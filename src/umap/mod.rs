@@ -6,3 +6,4 @@ pub mod init_graph_transform;
 pub mod find_ab_params;
 pub mod umap;
 pub mod make_epochs_per_sample;
+pub mod raise_disconnected_warning;

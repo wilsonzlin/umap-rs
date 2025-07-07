@@ -1,365 +1,155 @@
-class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
-    def __init__(
-        self,
-        n_neighbors=15,
-        n_components=2,
-        metric="euclidean",
-        metric_kwds=None,
-        output_metric="euclidean",
-        output_metric_kwds=None,
-        n_epochs=None,
-        learning_rate=1.0,
-        init="spectral",
-        min_dist=0.1,
-        spread=1.0,
-        set_op_mix_ratio=1.0,
-        local_connectivity=1.0,
-        repulsion_strength=1.0,
-        negative_sample_rate=5,
-        transform_queue_size=4.0,
-        a=None,
-        b=None,
-        random_state=None,
-        angular_rp_forest=False,
-        target_n_neighbors=-1,
-        target_metric="categorical",
-        target_metric_kwds=None,
-        target_weight=0.5,
-        transform_seed=42,
-        force_approximation_algorithm=False,
-        disconnection_distance=None,
-        precomputed_knn=(None, None, None),
-    ):
-        self.n_neighbors = n_neighbors
-        self.metric = metric
-        self.output_metric = output_metric
-        self.target_metric = target_metric
-        self.metric_kwds = metric_kwds
-        self.output_metric_kwds = output_metric_kwds
-        self.n_epochs = n_epochs
-        self.init = init
-        self.n_components = n_components
-        self.repulsion_strength = repulsion_strength
-        self.learning_rate = learning_rate
+use dashmap::DashSet;
+use derive_builder::Builder;
+use ndarray::ArrayView2;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-        self.spread = spread
-        self.min_dist = min_dist
-        self.set_op_mix_ratio = set_op_mix_ratio
-        self.local_connectivity = local_connectivity
-        self.negative_sample_rate = negative_sample_rate
-        self.random_state = random_state
-        self.angular_rp_forest = angular_rp_forest
-        self.transform_queue_size = transform_queue_size
-        self.target_n_neighbors = target_n_neighbors
-        self.target_metric = target_metric
-        self.target_metric_kwds = target_metric_kwds
-        self.target_weight = target_weight
-        self.transform_seed = transform_seed
-        self.force_approximation_algorithm = force_approximation_algorithm
+use crate::{metric::Metric, umap::{find_ab_params::find_ab_params, fuzzy_simplicial_set::FuzzySimplicialSet, raise_disconnected_warning::raise_disconnected_warning}};
 
-        self.disconnection_distance = disconnection_distance
-        self.precomputed_knn = precomputed_knn
 
-        self.a = a
-        self.b = b
 
-    def _validate_parameters(self):
-        if self.set_op_mix_ratio < 0.0 or self.set_op_mix_ratio > 1.0:
-            raise ValueError("set_op_mix_ratio must be between 0.0 and 1.0")
-        if self.repulsion_strength < 0.0:
-            raise ValueError("repulsion_strength cannot be negative")
-        if self.min_dist > self.spread:
-            raise ValueError("min_dist must be less than or equal to spread")
-        if self.min_dist < 0.0:
-            raise ValueError("min_dist cannot be negative")
-        if not isinstance(self.init, str) and not isinstance(self.init, np.ndarray):
-            raise ValueError("init must be a string or ndarray")
-        if (
-            isinstance(self.init, np.ndarray)
-            and self.init.shape[1] != self.n_components
-        ):
-            raise ValueError("init ndarray must match n_components value")
-        if not isinstance(self.metric, str) and not callable(self.metric):
-            raise ValueError("metric must be string or callable")
-        if self.negative_sample_rate < 0:
-            raise ValueError("negative sample rate must be positive")
-        if self._initial_alpha < 0.0:
-            raise ValueError("learning_rate must be positive")
-        if self.n_neighbors < 2:
-            raise ValueError("n_neighbors must be greater than 1")
-        if self.target_n_neighbors < 2 and self.target_n_neighbors != -1:
-            raise ValueError("target_n_neighbors must be greater than 1")
-        if not isinstance(self.n_components, int):
-            if isinstance(self.n_components, str):
-                raise ValueError("n_components must be an int")
-            if self.n_components % 1 != 0:
-                raise ValueError("n_components must be a whole number")
-            try:
-                # this will convert other types of int (eg. numpy int64)
-                # to Python int
-                self.n_components = int(self.n_components)
-            except ValueError:
-                raise ValueError("n_components must be an int")
-        if self.n_components < 1:
-            raise ValueError("n_components must be greater than 0")
-        self.n_epochs_list = None
-        if (
-            isinstance(self.n_epochs, list)
-            or isinstance(self.n_epochs, tuple)
-            or isinstance(self.n_epochs, np.ndarray)
-        ):
-            if not issubclass(
-                np.array(self.n_epochs).dtype.type, np.integer
-            ) or not np.all(np.array(self.n_epochs) >= 0):
-                raise ValueError(
-                    "n_epochs must be a nonnegative integer "
-                    "or a list of nonnegative integers"
-                )
-            self.n_epochs_list = list(self.n_epochs)
-        elif self.n_epochs is not None and (
-            self.n_epochs < 0 or not isinstance(self.n_epochs, int)
-        ):
-            raise ValueError(
-                "n_epochs must be a nonnegative integer "
-                "or a list of nonnegative integers"
-            )
-        if self.metric_kwds is None:
-            self._metric_kwds = {}
-        else:
-            self._metric_kwds = self.metric_kwds
-        if self.output_metric_kwds is None:
-            self._output_metric_kwds = {}
-        else:
-            self._output_metric_kwds = self.output_metric_kwds
-        if self.target_metric_kwds is None:
-            self._target_metric_kwds = {}
-        else:
-            self._target_metric_kwds = self.target_metric_kwds
-        # set input distance metric & inverse_transform distance metric
-        if callable(self.metric):
-            in_returns_grad = self._check_custom_metric(
-                self.metric, self._metric_kwds, self._raw_data
-            )
-            if in_returns_grad:
-                _m = self.metric
+#[derive(Debug, Default)]
+struct State {
+  // [DIVERGE] How many rows are in the input dataset.
+  // We store this to avoid needing to store the entire dataset, for cheaper serialization.
+  n: usize,
+  a: f32,
+  b: f32,
+  initial_alpha: f32,
+  disconnection_distance: f32,
+}
 
-                @numba.njit(fastmath=True)
-                def _dist_only(x, y, *kwds):
-                    return _m(x, y, *kwds)[0]
+#[derive(Builder, Debug)]
+#[builder(setter(into))]
+pub struct Umap<'a> {
+  #[builder(default = "15")]
+  n_neighbors: usize,
+  #[builder(default = "2")]
+  n_components: usize,
+  metric: &'a dyn Metric,
+  output_metric: &'a dyn Metric,
+  n_epochs: Option<usize>,
+  #[builder(default = "1.0")]
+  learning_rate: f32,
+  init: &'a ArrayView2<'a, f32>,
+  #[builder(default = "0.1")]
+  min_dist: f32,
+  #[builder(default = "1.0")]
+  spread: f32,
+  #[builder(default = "1.0")]
+  set_op_mix_ratio: f32,
+  #[builder(default = "1.0")]
+  local_connectivity: f32,
+  #[builder(default = "1.0")]
+  repulsion_strength: f32,
+  #[builder(default = "5")]
+  negative_sample_rate: usize,
+  #[builder(default = "4.0")]
+  transform_queue_size: f32,
+  a: Option<f32>,
+  b: Option<f32>,
+  #[builder(default = "42")]
+  transform_seed: usize,
+  disconnection_distance: Option<f32>,
+  knn_dists: &'a ArrayView2<'a, f32>,
+  knn_indices: &'a ArrayView2<'a, u32>,
 
-                self._input_distance_func = _dist_only
-                self._inverse_distance_func = self.metric
-            else:
-                self._input_distance_func = self.metric
-                self._inverse_distance_func = None
-                warn(
-                    "custom distance metric does not return gradient; inverse_transform will be unavailable. "
-                    "To enable using inverse_transform method, define a distance function that returns a tuple "
-                    "of (distance [float], gradient [np.array])"
-                )
-        elif self.metric == "hellinger" and self._raw_data.min() < 0:
-            raise ValueError("Metric 'hellinger' does not support negative values")
-        elif self.metric in dist.named_distances:
-            self._input_distance_func = dist.named_distances[self.metric]
-            try:
-                self._inverse_distance_func = dist.named_distances_with_gradients[
-                    self.metric
-                ]
-            except KeyError:
-                warn(
-                    "gradient function is not yet implemented for {} distance metric; "
-                    "inverse_transform will be unavailable".format(self.metric)
-                )
-                self._inverse_distance_func = None
-        elif self.metric in pynn_named_distances:
-            self._input_distance_func = pynn_named_distances[self.metric]
+  #[builder(setter(skip))]
+  _s: State,
+}
 
-            warn(
-                "gradient function is not yet implemented for {} distance metric; "
-                "inverse_transform will be unavailable".format(self.metric)
-            )
-            self._inverse_distance_func = None
-        else:
-            raise ValueError("metric is neither callable nor a recognised string")
-        # set output distance metric
-        if callable(self.output_metric):
-            out_returns_grad = self._check_custom_metric(
-                self.output_metric, self._output_metric_kwds
-            )
-            if out_returns_grad:
-                self._output_distance_func = self.output_metric
-            else:
-                raise ValueError(
-                    "custom output_metric must return a tuple of (distance [float], gradient [np.array])"
-                )
-        elif self.output_metric == "precomputed":
-            raise ValueError("output_metric cannnot be 'precomputed'")
-        elif self.output_metric in dist.named_distances_with_gradients:
-            self._output_distance_func = dist.named_distances_with_gradients[
-                self.output_metric
-            ]
-        elif self.output_metric in dist.named_distances:
-            raise ValueError(
-                "gradient function is not yet implemented for {}.".format(
-                    self.output_metric
-                )
-            )
-        else:
-            raise ValueError(
-                "output_metric is neither callable nor a recognised string"
-            )
-        # set angularity for NN search based on metric
-        if self.metric in (
-            "cosine",
-            "correlation",
-            "dice",
-            "jaccard",
-            "ll_dirichlet",
-            "hellinger",
-        ):
-            self.angular_rp_forest = True
+impl<'a> Umap<'a> {
+    fn _validate_parameters(&mut self) {
+        if self.set_op_mix_ratio < 0.0 || self.set_op_mix_ratio > 1.0 {
+            panic!("set_op_mix_ratio must be between 0.0 and 1.0");
+        }
+        if self.repulsion_strength < 0.0 {
+            panic!("repulsion_strength cannot be negative");
+        }
+        if self.min_dist > self.spread {
+            panic!("min_dist must be less than or equal to spread");
+        }
+        if self.min_dist < 0.0 {
+            panic!("min_dist cannot be negative");
+        };
+        if self.init.shape()[1] != self.n_components {
+            panic!("init ndarray must match n_components value");
+        }
+        if self.negative_sample_rate < 0 {
+            panic!("negative sample rate must be positive");
+        }
+        if self._s.initial_alpha < 0.0 {
+            panic!("learning_rate must be positive");
+        }
+        if self.n_neighbors < 2 {
+            panic!("n_neighbors must be greater than 1")
+        }
+        if self.n_components < 1 {
+            panic!("n_components must be greater than 0");
+        }
 
-        # This will be used to prune all edges of greater than a fixed value from our knn graph.
-        # We have preset defaults described in DISCONNECTION_DISTANCES for our bounded measures.
-        # Otherwise a user can pass in their own value.
-        if self.disconnection_distance is None:
-            self._disconnection_distance = DISCONNECTION_DISTANCES.get(
-                self.metric, np.inf
-            )
-        elif isinstance(self.disconnection_distance, int) or isinstance(
-            self.disconnection_distance, float
-        ):
-            self._disconnection_distance = self.disconnection_distance
-        else:
-            raise ValueError("disconnection_distance must either be None or a numeric.")
+        // This will be used to prune all edges of greater than a fixed value from our knn graph.
+        // We have preset defaults described in DISCONNECTION_DISTANCES for our bounded measures.
+        // Otherwise a user can pass in their own value.
+        self._s.disconnection_distance = self.disconnection_distance.unwrap_or_else(|| self.metric.default_disconnection_distance());
 
-        if self.tqdm_kwds is None:
-            self.tqdm_kwds = {}
-        else:
-            if isinstance(self.tqdm_kwds, dict) is False:
-                raise ValueError(
-                    "tqdm_kwds must be a dictionary. Please provide valid tqdm "
-                    "parameters as key value pairs. Valid tqdm parameters can be "
-                    "found here: https://github.com/tqdm/tqdm#parameters"
-                )
-        if "desc" not in self.tqdm_kwds:
-            self.tqdm_kwds["desc"] = "Epochs completed"
-        if "bar_format" not in self.tqdm_kwds:
-            bar_f = "{desc}: {percentage:3.0f}%| {bar} {n_fmt}/{total_fmt} [{elapsed}]"
-            self.tqdm_kwds["bar_format"] = bar_f
+        if self.knn_dists.shape() != self.knn_indices.shape() {
+            panic!(
+                "knn_dists and knn_indices must be numpy arrays of the same size"
+            );
+        }
+        if self.knn_dists.shape()[1] != self.n_neighbors {
+            panic!("knn_dists has a number of neighbors not equal to n_neighbors parameter");
+        }
+        if self.knn_dists.shape()[0] != self._s.n {
+            panic!(
+                "knn_dists has a different number of samples than the data you are fitting"
+            );
+        }
+    }
 
-        if hasattr(self, "knn_dists") and self.knn_dists is not None:
-            if not isinstance(self.knn_indices, np.ndarray):
-                raise ValueError("precomputed_knn[0] must be ndarray object.")
-            if not isinstance(self.knn_dists, np.ndarray):
-                raise ValueError("precomputed_knn[1] must be ndarray object.")
-            if self.knn_dists.shape != self.knn_indices.shape:
-                raise ValueError(
-                    "precomputed_knn[0] and precomputed_knn[1]"
-                    " must be numpy arrays of the same size."
-                )
-            # #848: warn but proceed if no search index is present
-            if not isinstance(self.knn_search_index, NNDescent):
-                warn(
-                    "precomputed_knn[2] (knn_search_index) "
-                    "is not an NNDescent object: transforming new data with transform "
-                    "will be unavailable."
-                )
-            if self.knn_dists.shape[1] < self.n_neighbors:
-                warn(
-                    "precomputed_knn has a lower number of neighbors than "
-                    "n_neighbors parameter. precomputed_knn will be ignored"
-                    " and the k-nn will be computed normally."
-                )
-                self.knn_indices = None
-                self.knn_dists = None
-                self.knn_search_index = None
-            elif self.knn_dists.shape[0] != self._raw_data.shape[0]:
-                warn(
-                    "precomputed_knn has a different number of samples than the"
-                    " data you are fitting. precomputed_knn will be ignored and"
-                    "the k-nn will be computed normally."
-                )
-                self.knn_indices = None
-                self.knn_dists = None
-                self.knn_search_index = None
-            elif (
-                self.knn_dists.shape[0] < 4096
-                and not self.force_approximation_algorithm
-            ):
-                # force_approximation_algorithm is irrelevant for pre-computed knn
-                # always set it to True which keeps downstream code paths working
-                self.force_approximation_algorithm = True
-            elif self.knn_dists.shape[1] > self.n_neighbors:
-                # if k for precomputed_knn larger than n_neighbors we simply prune it
-                self.knn_indices = self.knn_indices[:, : self.n_neighbors]
-                self.knn_dists = self.knn_dists[:, : self.n_neighbors]
+    fn fit(&mut self, X: &ArrayView2<f32>) {
+        self._s.n = X.shape()[0];
 
-    def _check_custom_metric(self, metric, kwds, data=None):
-        # quickly check to determine whether user-defined
-        # self.metric/self.output_metric returns both distance and gradient
-        if data is not None:
-            # if checking the high-dimensional distance metric, test directly on
-            # input data so we don't risk violating any assumptions potentially
-            # hard-coded in the metric (e.g., bounded; non-negative)
-            x, y = data[np.random.randint(0, data.shape[0], 2)]
-        else:
-            # if checking the manifold distance metric, simulate some data on a
-            # reasonable interval with output dimensionality
-            x, y = np.random.uniform(low=-10, high=10, size=(2, self.n_components))
+        // Handle all the optional arguments, setting default
+        if self.a.is_none() || self.b.is_none() {
+            let (a, b) = find_ab_params(self.spread, self.min_dist);
+            self._s.a = a;
+            self._s.b = b;
+        } else {
+            self._s.a = self.a.unwrap();
+            self._s.b = self.b.unwrap();
+        }
 
-        metric_out = metric(x, y, **kwds)
-        # True if metric returns iterable of length 2, False otherwise
-        return hasattr(metric_out, "__iter__") and len(metric_out) == 2
+        let init = self.init;
 
-    def fit(self, X, **kwargs):
-        self._raw_data = X
+        self._s.initial_alpha = self.learning_rate;
 
-        # Handle all the optional arguments, setting default
-        if self.a is None or self.b is None:
-            self._a, self._b = find_ab_params(self.spread, self.min_dist)
-        else:
-            self._a = self.a
-            self._b = self.b
+        self._validate_parameters();
 
-        init = self.init
+        // Error check n_neighbors based on data size
+        assert!(X.shape()[0] > self.n_neighbors);
 
-        self._initial_alpha = self.learning_rate
+        let random_state = check_random_state(self.random_state);
 
-        self.knn_indices = self.precomputed_knn[0]
-        self.knn_dists = self.precomputed_knn[1]
-        self.knn_search_index = None
-
-        self._validate_parameters()
-
-        # If we aren't asking for unique use the full index.
-        # This will save special cases later.
-        index = list(range(X.shape[0]))
-        inverse = list(range(X.shape[0]))
-
-        # Error check n_neighbors based on data size
-        assert X[index].shape[0] > self.n_neighbors
-        self._n_neighbors = self.n_neighbors
-
-        random_state = check_random_state(self.random_state)
-
-        nn_metric = self._input_distance_func
-        self._knn_indices = self.knn_indices
-        self._knn_dists = self.knn_dists
-        self._knn_search_index = self.knn_search_index
-        # Disconnect any vertices farther apart than _disconnection_distance
-        disconnected_index = self._knn_dists >= self._disconnection_distance
-        self._knn_indices[disconnected_index] = -1
-        self._knn_dists[disconnected_index] = np.inf
-        edges_removed = disconnected_index.sum()
+        // Disconnect any vertices farther apart than _disconnection_distance
+        let knn_disconnections = DashSet::new();
+        (0..self._s.n).into_par_iter().for_each(|row_no| {
+          let row = self.knn_dists.row(row_no);
+          for (col_no, &dist) in row.iter().enumerate() {
+            if dist >= self._s.disconnection_distance {
+              knn_disconnections.insert((row_no, col_no));
+            }
+          }
+        });
+        let edges_removed = knn_disconnections.len();
 
         (
             self.graph_,
             self._sigmas,
             self._rhos,
             self.graph_dists_,
-        ) = fuzzy_simplicial_set(
-            X[index],
+        ) = FuzzySimplicialSet::default()(
+            X,
             self.n_neighbors,
             random_state,
             nn_metric,
@@ -370,61 +160,45 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self.set_op_mix_ratio,
             self.local_connectivity,
             True,
-        )
-        # Report the number of vertices with degree 0 in our umap.graph_
-        # This ensures that they were properly disconnected.
-        vertices_disconnected = np.sum(
+        );
+        // Report the number of vertices with degree 0 in our umap.graph_
+        // This ensures that they were properly disconnected.
+        let vertices_disconnected = np.sum(
             np.array(self.graph_.sum(axis=1)).flatten() == 0
-        )
+        );
         raise_disconnected_warning(
             edges_removed,
             vertices_disconnected,
             self._disconnection_distance,
             self._raw_data.shape[0],
             verbose=self.verbose,
-        )
+        );
 
-        epochs = (
+        let epochs = (
             self.n_epochs_list if self.n_epochs_list is not None else self.n_epochs
-        )
+        );
         self.embedding_, aux_data = self._fit_embed_data(
-            self._raw_data[index],
+            X,
             epochs,
             init,
-            random_state,  # JH why raw data?
-            **kwargs,
-        )
+            random_state,  // JH why raw data?
+        );
 
-        if self.n_epochs_list is not None:
-            if "embedding_list" not in aux_data:
-                raise KeyError(
-                    "No list of embedding were found in 'aux_data'. "
-                    "It is likely the layout optimization function "
-                    "doesn't support the list of int for 'n_epochs'."
-                )
-            else:
-                self.embedding_list_ = [
-                    e[inverse] for e in aux_data["embedding_list"]
-                ]
-
-        # Assign any points that are fully disconnected from our manifold(s) to have embedding
-        # coordinates of np.nan.  These will be filtered by our plotting functions automatically.
-        # They also prevent users from being deceived a distance query to one of these points.
-        # Might be worth moving this into simplicial_set_embedding or _fit_embed_data
-        disconnected_vertices = np.array(self.graph_.sum(axis=1)).flatten() == 0
-        if len(disconnected_vertices) > 0:
+        // Assign any points that are fully disconnected from our manifold(s) to have embedding
+        // coordinates of np.nan.  These will be filtered by our plotting functions automatically.
+        // They also prevent users from being deceived a distance query to one of these points.
+        // Might be worth moving this into simplicial_set_embedding or _fit_embed_data
+        let disconnected_vertices = np.array(self.graph_.sum(axis=1)).flatten() == 0;
+        if len(disconnected_vertices) > 0 {
             self.embedding_[disconnected_vertices] = np.full(
                 self.n_components, np.nan
-            )
+            );
+        }
 
-        self.embedding_ = self.embedding_[inverse]
+        self
+    }
 
-        # Set number of features out for sklearn API
-        self._n_features_out = self.embedding_.shape[1]
-
-        return self
-
-    def _fit_embed_data(self, X, n_epochs, init, random_state, **kwargs):
+    fn _fit_embed_data(&self, X, n_epochs, init, random_state) {
         """A method wrapper for simplicial_set_embedding that can be
         replaced by subclasses. Arbitrary keyword arguments can be passed
         through .fit() and .fit_transform().
@@ -443,27 +217,30 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self._output_metric_kwds,
             self.output_metric in ("euclidean", "l2"),
         )
+    }
 
-    def fit_transform(self, X, **kwargs):
+    fn fit_transform(self, X) {
         self.fit(X, **kwargs)
         return self.embedding_
+    }
 
-    def transform(self, X):
-        # If we fit just a single instance then error
-        if self._raw_data.shape[0] == 1:
-            raise ValueError(
+    fn transform(self, X) {
+        // If we fit just a single instance then error
+        if self._raw_data.shape[0] == 1 {
+            panic!(
                 "Transform unavailable when model was fit with only a single data sample."
-            )
+            );
+        }
 
-        # #848: knn_search_index is allowed to be None if not transforming new data,
-        # so now we must validate that if it exists it is not None
+        // #848: knn_search_index is allowed to be None if not transforming new data,
+        // so now we must validate that if it exists it is not None
         if hasattr(self, "_knn_search_index") and self._knn_search_index is None:
             raise NotImplementedError(
                 "No search index available: transforming data"
                 " into an existing embedding is not supported"
             )
 
-        # X = check_array(X, dtype=np.float32, order="C", accept_sparse="csr")
+        // X = check_array(X, dtype=np.float32, order="C", accept_sparse="csr")
         random_state = check_random_state(self.transform_seed)
         rng_state = random_state.randint(INT32_MIN, INT32_MAX, 3).astype(np.int64)
 
@@ -473,7 +250,7 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         )
 
         dists = dists.astype(np.float32, order="C")
-        # Remove any nearest neighbours who's distances are greater than our disconnection_distance
+        // Remove any nearest neighbours who's distances are greater than our disconnection_distance
         indices[dists >= self._disconnection_distance] = -1
         adjusted_local_connectivity = max(0.0, self.local_connectivity - 1.0)
         sigmas, rhos = smooth_knn_dist(
@@ -482,49 +259,51 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             local_connectivity=float(adjusted_local_connectivity),
         )
 
-        rows, cols, vals, dists = compute_membership_strengths(
+        let (rows, cols, vals) = compute_membership_strengths(
             indices, dists, sigmas, rhos, bipartite=True
-        )
+        );
 
-        graph = scipy.sparse.coo_matrix(
+        let graph = scipy.sparse.coo_matrix(
             (vals, (rows, cols)), shape=(X.shape[0], self._raw_data.shape[0])
-        )
+        );
 
-        # This was a very specially constructed graph with constant degree.
-        # That lets us do fancy unpacking by reshaping the csr matrix indices
-        # and data. Doing so relies on the constant degree assumption!
-        # csr_graph = normalize(graph.tocsr(), norm="l1")
-        # inds = csr_graph.indices.reshape(X.shape[0], self._n_neighbors)
-        # weights = csr_graph.data.reshape(X.shape[0], self._n_neighbors)
-        # embedding = init_transform(inds, weights, self.embedding_)
-        # This is less fast code than the above numba.jit'd code.
-        # It handles the fact that our nearest neighbour graph can now contain variable numbers of vertices.
+        // This was a very specially constructed graph with constant degree.
+        // That lets us do fancy unpacking by reshaping the csr matrix indices
+        // and data. Doing so relies on the constant degree assumption!
+        // csr_graph = normalize(graph.tocsr(), norm="l1")
+        // inds = csr_graph.indices.reshape(X.shape[0], self._n_neighbors)
+        // weights = csr_graph.data.reshape(X.shape[0], self._n_neighbors)
+        // embedding = init_transform(inds, weights, self.embedding_)
+        // This is less fast code than the above numba.jit'd code.
+        // It handles the fact that our nearest neighbour graph can now contain variable numbers of vertices.
         csr_graph = graph.tocsr()
         csr_graph.eliminate_zeros()
         embedding = init_graph_transform(csr_graph, self.embedding_)
 
-        if self.n_epochs is None:
-            # For smaller datasets we can use more epochs
-            if graph.shape[0] <= 10000:
-                n_epochs = 100
-            else:
-                n_epochs = 30
-        else:
-            n_epochs = int(self.n_epochs // 3.0)
+        let n_epochs = if self.n_epochs.is_none() {
+            // For smaller datasets we can use more epochs
+            if graph.shape[0] <= 10000 {
+                100
+            } else {
+                30
+            }
+        } else {
+            self.n_epochs.unwrap() / 3
+        };
 
-        graph.data[graph.data < (graph.data.max() / float(n_epochs))] = 0.0
-        graph.eliminate_zeros()
+        graph.data[graph.data < (graph.data.max() / float(n_epochs))] = 0.0;
+        graph.eliminate_zeros();
 
-        epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs)
+        epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs);
 
-        head = graph.row
-        tail = graph.col
-        weight = graph.data
+        head = graph.row;
+        tail = graph.col;
+        weight = graph.data;
 
-        if self.output_metric == "euclidean":
+        if self.output_metric.is_euclidean() {
             embedding = optimize_layout_euclidean(
                 embedding,
-                self.embedding_.astype(np.float32, copy=True),  # Fixes #179 & #217,
+                self.embedding_.astype(np.float32, copy=True),  // Fixes #179 & #217,
                 head,
                 tail,
                 n_epochs,
@@ -538,10 +317,10 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
                 self.negative_sample_rate,
                 self.random_state is None,
             )
-        else:
+        } else {
             embedding = optimize_layout_generic(
                 embedding,
-                self.embedding_.astype(np.float32, copy=True),  # Fixes #179 & #217
+                self.embedding_.astype(np.float32, copy=True),  // Fixes #179 & #217
                 head,
                 tail,
                 n_epochs,
@@ -558,5 +337,8 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
                 verbose=self.verbose,
                 tqdm_kwds=self.tqdm_kwds,
             )
+        };
 
-        return embedding
+        embedding
+    }
+}

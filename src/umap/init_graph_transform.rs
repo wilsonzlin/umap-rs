@@ -1,39 +1,53 @@
-def init_graph_transform(graph, embedding):
-    """Given a bipartite graph representing the 1-simplices and strengths between the
-    new points and the original data set along with an embedding of the original points
-    initialize the positions of new points relative to the strengths (of their neighbors in the source data).
+use std::iter::zip;
 
-    If a point is in our original data set it embeds at the original points coordinates.
-    If a point has no neighbours in our original dataset it embeds as the np.nan vector.
-    Otherwise a point is the weighted average of it's neighbours embedding locations.
+use ndarray::{Array2, ArrayView2};
+use sprs::CsMatView;
 
-    Parameters
-    ----------
-    graph: csr_matrix (n_new_samples, n_samples)
-        A matrix indicating the 1-simplices and their associated strengths.  These strengths should
-        be values between zero and one and not normalized.  One indicating that the new point was identical
-        to one of our original points.
+/*
+  Given a bipartite graph representing the 1-simplices and strengths between the
+  new points and the original data set along with an embedding of the original points
+  initialize the positions of new points relative to the strengths (of their neighbors in the source data).
 
-    embedding: array of shape (n_samples, dim)
-        The original embedding of the source data.
+  If a point is in our original data set it embeds at the original points coordinates.
+  If a point has no neighbours in our original dataset it embeds as the np.nan vector.
+  Otherwise a point is the weighted average of it's neighbours embedding locations.
 
-    Returns
-    -------
-    new_embedding: array of shape (n_new_samples, dim)
-        An initial embedding of the new sample points.
-    """
-    result = np.zeros((graph.shape[0], embedding.shape[1]), dtype=np.float32)
+  Parameters
+  ----------
+  graph: csr_matrix (n_new_samples, n_samples)
+      A matrix indicating the 1-simplices and their associated strengths.  These strengths should
+      be values between zero and one and not normalized.  One indicating that the new point was identical
+      to one of our original points.
 
-    for row_index in range(graph.shape[0]):
-        graph_row = graph[row_index]
-        if graph_row.nnz == 0:
-            result[row_index] = np.nan
-            continue
-        row_sum = graph_row.sum()
-        for graph_value, col_index in zip(graph_row.data, graph_row.indices):
-            if graph_value == 1:
-                result[row_index, :] = embedding[col_index, :]
-                break
-            result[row_index] += graph_value / row_sum * embedding[col_index]
+  embedding: array of shape (n_samples, dim)
+      The original embedding of the source data.
 
-    return result
+  Returns
+  -------
+  new_embedding: array of shape (n_new_samples, dim)
+      An initial embedding of the new sample points.
+*/
+pub fn init_graph_transform(
+  graph: &CsMatView<f32>,
+  embedding: &ArrayView2<f32>,
+) {
+  let result = Array2::<f32>::zeros((graph.shape[0], embedding.shape[1]));
+
+  for row_index in 0..graph.shape[0] {
+    let graph_row = graph.outer_view(row_index).unwrap();
+    if graph_row.nnz() == 0 {
+      result.row_mut(row_index) = f32::NAN;
+      continue;
+    }
+    row_sum = graph_row.sum();
+    for (graph_value, col_index) in zip(graph_row.data(), graph_row.indices()) {
+      if graph_value == 1 {
+        result.row_mut(row_index) = embedding.row(col_index);
+        break
+      };
+      result[row_index] += graph_value / row_sum * embedding[col_index];
+    }
+  }
+
+  result
+}

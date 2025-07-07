@@ -1,11 +1,11 @@
-def raise_disconnected_warning(
+pub fn raise_disconnected_warning(
   edges_removed,
   vertices_disconnected,
   disconnection_distance,
   total_rows,
   threshold=0.1,
   verbose=False,
-):
+) {
   """A simple wrapper function to avoid large amounts of code repetition."""
   if verbose & (vertices_disconnected == 0) & (edges_removed > 0):
       print(
@@ -29,3 +29,4 @@ def raise_disconnected_warning(
           f"You might consider using find_disconnected_points() to find and remove these points from your data.\n"
           f"Use umap.utils.disconnected_vertices() to identify them.",
       )
+}
