@@ -36,45 +36,6 @@ DISCONNECTION_DISTANCES = {
 }
 
 
-def flatten_iter(container):
-    for i in container:
-        if isinstance(i, (list, tuple)):
-            for j in flatten_iter(i):
-                yield j
-        else:
-            yield i
-
-
-def flattened(container):
-    return tuple(flatten_iter(container))
-
-
-def breadth_first_search(adjmat, start, min_vertices):
-    explored = []
-    queue = [start]
-    levels = {}
-    levels[start] = 0
-    max_level = np.inf
-    visited = [start]
-
-    while queue:
-        node = queue.pop(0)
-        explored.append(node)
-        if max_level == np.inf and len(explored) > min_vertices:
-            max_level = max(levels.values())
-
-        if levels[node] + 1 < max_level:
-            neighbors = adjmat[node].indices
-            for neighbour in neighbors:
-                if neighbour not in visited:
-                    queue.append(neighbour)
-                    visited.append(neighbour)
-
-                    levels[neighbour] = levels[node] + 1
-
-    return np.array(explored)
-
-
 def raise_disconnected_warning(
     edges_removed,
     vertices_disconnected,
@@ -371,292 +332,6 @@ def fuzzy_simplicial_set(
         return result, sigmas, rhos, dists
 
 
-@numba.njit()
-def fast_intersection(rows, cols, values, target, unknown_dist=1.0, far_dist=5.0):
-    """Under the assumption of categorical distance for the intersecting
-    simplicial set perform a fast intersection.
-
-    Parameters
-    ----------
-    rows: array
-        An array of the row of each non-zero in the sparse matrix
-        representation.
-
-    cols: array
-        An array of the column of each non-zero in the sparse matrix
-        representation.
-
-    values: array
-        An array of the value of each non-zero in the sparse matrix
-        representation.
-
-    target: array of shape (n_samples)
-        The categorical labels to use in the intersection.
-
-    unknown_dist: float (optional, default 1.0)
-        The distance an unknown label (-1) is assumed to be from any point.
-
-    far_dist float (optional, default 5.0)
-        The distance between unmatched labels.
-
-    Returns
-    -------
-    None
-    """
-    for nz in range(rows.shape[0]):
-        i = rows[nz]
-        j = cols[nz]
-        if (target[i] == -1) or (target[j] == -1):
-            values[nz] *= np.exp(-unknown_dist)
-        elif target[i] != target[j]:
-            values[nz] *= np.exp(-far_dist)
-
-    return
-
-
-@numba.njit()
-def fast_metric_intersection(
-    rows, cols, values, discrete_space, metric, metric_args, scale
-):
-    """Under the assumption of categorical distance for the intersecting
-    simplicial set perform a fast intersection.
-
-    Parameters
-    ----------
-    rows: array
-        An array of the row of each non-zero in the sparse matrix
-        representation.
-
-    cols: array
-        An array of the column of each non-zero in the sparse matrix
-        representation.
-
-    values: array of shape
-        An array of the values of each non-zero in the sparse matrix
-        representation.
-
-    discrete_space: array of shape (n_samples, n_features)
-        The vectors of categorical labels to use in the intersection.
-
-    metric: numba function
-        The function used to calculate distance over the target array.
-
-    scale: float
-        A scaling to apply to the metric.
-
-    Returns
-    -------
-    None
-    """
-    for nz in range(rows.shape[0]):
-        i = rows[nz]
-        j = cols[nz]
-        dist = metric(discrete_space[i], discrete_space[j], *metric_args)
-        values[nz] *= np.exp(-(scale * dist))
-
-    return
-
-
-@numba.njit()
-def reprocess_row(probabilities, k=15, n_iters=32):
-    target = np.log2(k)
-
-    lo = 0.0
-    hi = NPY_INFINITY
-    mid = 1.0
-
-    for n in range(n_iters):
-
-        psum = 0.0
-        for j in range(probabilities.shape[0]):
-            psum += pow(probabilities[j], mid)
-
-        if np.fabs(psum - target) < SMOOTH_K_TOLERANCE:
-            break
-
-        if psum < target:
-            hi = mid
-            mid = (lo + hi) / 2.0
-        else:
-            lo = mid
-            if hi == NPY_INFINITY:
-                mid *= 2
-            else:
-                mid = (lo + hi) / 2.0
-
-    return np.power(probabilities, mid)
-
-
-@numba.njit()
-def reset_local_metrics(simplicial_set_indptr, simplicial_set_data):
-    for i in range(simplicial_set_indptr.shape[0] - 1):
-        simplicial_set_data[simplicial_set_indptr[i] : simplicial_set_indptr[i + 1]] = (
-            reprocess_row(
-                simplicial_set_data[
-                    simplicial_set_indptr[i] : simplicial_set_indptr[i + 1]
-                ]
-            )
-        )
-    return
-
-
-def reset_local_connectivity(simplicial_set, reset_local_metric=False):
-    """Reset the local connectivity requirement -- each data sample should
-    have complete confidence in at least one 1-simplex in the simplicial set.
-    We can enforce this by locally rescaling confidences, and then remerging the
-    different local simplicial sets together.
-
-    Parameters
-    ----------
-    simplicial_set: sparse matrix
-        The simplicial set for which to recalculate with respect to local
-        connectivity.
-
-    Returns
-    -------
-    simplicial_set: sparse_matrix
-        The recalculated simplicial set, now with the local connectivity
-        assumption restored.
-    """
-    simplicial_set = normalize(simplicial_set, norm="max")
-    if reset_local_metric:
-        simplicial_set = simplicial_set.tocsr()
-        reset_local_metrics(simplicial_set.indptr, simplicial_set.data)
-        simplicial_set = simplicial_set.tocoo()
-    transpose = simplicial_set.transpose()
-    prod_matrix = simplicial_set.multiply(transpose)
-    simplicial_set = simplicial_set + transpose - prod_matrix
-    simplicial_set.eliminate_zeros()
-
-    return simplicial_set
-
-
-def discrete_metric_simplicial_set_intersection(
-    simplicial_set,
-    discrete_space,
-    unknown_dist=1.0,
-    far_dist=5.0,
-    metric=None,
-    metric_kws={},
-    metric_scale=1.0,
-):
-    """Combine a fuzzy simplicial set with another fuzzy simplicial set
-    generated from discrete metric data using discrete distances. The target
-    data is assumed to be categorical label data (a vector of labels),
-    and this will update the fuzzy simplicial set to respect that label data.
-
-    TODO: optional category cardinality based weighting of distance
-
-    Parameters
-    ----------
-    simplicial_set: sparse matrix
-        The input fuzzy simplicial set.
-
-    discrete_space: array of shape (n_samples)
-        The categorical labels to use in the intersection.
-
-    unknown_dist: float (optional, default 1.0)
-        The distance an unknown label (-1) is assumed to be from any point.
-
-    far_dist: float (optional, default 5.0)
-        The distance between unmatched labels.
-
-    metric: str (optional, default None)
-        If not None, then use this metric to determine the
-        distance between values.
-
-    metric_scale: float (optional, default 1.0)
-        If using a custom metric scale the distance values by
-        this value -- this controls the weighting of the
-        intersection. Larger values weight more toward target.
-
-    Returns
-    -------
-    simplicial_set: sparse matrix
-        The resulting intersected fuzzy simplicial set.
-    """
-    simplicial_set = simplicial_set.tocoo()
-
-    if metric is not None:
-        # We presume target is now a 2d array, with each row being a
-        # vector of target info
-        if metric in dist.named_distances:
-            metric_func = dist.named_distances[metric]
-        else:
-            raise ValueError("Discrete intersection metric is not recognized")
-
-        fast_metric_intersection(
-            simplicial_set.row,
-            simplicial_set.col,
-            simplicial_set.data,
-            discrete_space,
-            metric_func,
-            tuple(metric_kws.values()),
-            metric_scale,
-        )
-    else:
-        fast_intersection(
-            simplicial_set.row,
-            simplicial_set.col,
-            simplicial_set.data,
-            discrete_space,
-            unknown_dist,
-            far_dist,
-        )
-
-    simplicial_set.eliminate_zeros()
-
-    return reset_local_connectivity(simplicial_set)
-
-
-def general_simplicial_set_intersection(
-    simplicial_set1, simplicial_set2, weight=0.5, right_complement=False
-):
-
-    if right_complement:
-        result = simplicial_set1.tocoo()
-    else:
-        result = (simplicial_set1 + simplicial_set2).tocoo()
-    left = simplicial_set1.tocsr()
-    right = simplicial_set2.tocsr()
-
-    sparse.general_sset_intersection(
-        left.indptr,
-        left.indices,
-        left.data,
-        right.indptr,
-        right.indices,
-        right.data,
-        result.row,
-        result.col,
-        result.data,
-        mix_weight=weight,
-        right_complement=right_complement,
-    )
-
-    return result
-
-
-def general_simplicial_set_union(simplicial_set1, simplicial_set2):
-    result = (simplicial_set1 + simplicial_set2).tocoo()
-    left = simplicial_set1.tocsr()
-    right = simplicial_set2.tocsr()
-
-    sparse.general_sset_union(
-        left.indptr,
-        left.indices,
-        left.data,
-        right.indptr,
-        right.indices,
-        right.data,
-        result.row,
-        result.col,
-        result.data,
-    )
-
-    return result
-
-
 def make_epochs_per_sample(weights, n_epochs):
     """Given a set of weights and number of epochs generate the number of
     epochs per sample for each weight.
@@ -677,16 +352,6 @@ def make_epochs_per_sample(weights, n_epochs):
     n_samples = n_epochs * (weights / weights.max())
     result[n_samples > 0] = float(n_epochs) / np.float64(n_samples[n_samples > 0])
     return result
-
-
-# scale coords so that the largest coordinate is max_coords, then add normal-distributed
-# noise with standard deviation noise
-def noisy_scale_coords(coords, random_state, max_coord=10.0, noise=0.0001):
-    expansion = max_coord / np.abs(coords).max()
-    coords = (coords * expansion).astype(np.float32)
-    return coords + random_state.normal(scale=noise, size=coords.shape).astype(
-        np.float32
-    )
 
 
 def simplicial_set_embedding(
@@ -719,10 +384,6 @@ def simplicial_set_embedding(
         default_epochs = 500
     else:
         default_epochs = 200
-
-    # Use more epochs for densMAP
-    if densmap:
-        default_epochs += 200
 
     if n_epochs is None:
         n_epochs = default_epochs
@@ -816,39 +477,6 @@ def simplicial_set_embedding(
     return embedding, aux_data
 
 
-@numba.njit()
-def init_transform(indices, weights, embedding):
-    """Given indices and weights and an original embeddings
-    initialize the positions of new points relative to the
-    indices and weights (of their neighbors in the source data).
-
-    Parameters
-    ----------
-    indices: array of shape (n_new_samples, n_neighbors)
-        The indices of the neighbors of each new sample
-
-    weights: array of shape (n_new_samples, n_neighbors)
-        The membership strengths of associated 1-simplices
-        for each of the new samples.
-
-    embedding: array of shape (n_samples, dim)
-        The original embedding of the source data.
-
-    Returns
-    -------
-    new_embedding: array of shape (n_new_samples, dim)
-        An initial embedding of the new sample points.
-    """
-    result = np.zeros((indices.shape[0], embedding.shape[1]), dtype=np.float32)
-
-    for i in range(indices.shape[0]):
-        for j in range(indices.shape[1]):
-            for d in range(embedding.shape[1]):
-                result[i, d] += weights[i, j] * embedding[indices[i, j], d]
-
-    return result
-
-
 def init_graph_transform(graph, embedding):
     """Given a bipartite graph representing the 1-simplices and strengths between the
     new points and the original data set along with an embedding of the original points
@@ -888,21 +516,6 @@ def init_graph_transform(graph, embedding):
             result[row_index] += graph_value / row_sum * embedding[col_index]
 
     return result
-
-
-@numba.njit()
-def init_update(current_init, n_original_samples, indices):
-    for i in range(n_original_samples, indices.shape[0]):
-        n = 0
-        for j in range(indices.shape[1]):
-            for d in range(current_init.shape[1]):
-                if indices[i, j] < n_original_samples:
-                    n += 1
-                    current_init[i, d] += current_init[indices[i, j], d]
-        for d in range(current_init.shape[1]):
-            current_init[i, d] /= n
-
-    return
 
 
 def find_ab_params(spread, min_dist):
@@ -952,10 +565,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         target_weight=0.5,
         transform_seed=42,
         force_approximation_algorithm=False,
-        densmap=False,
-        dens_lambda=2.0,
-        dens_frac=0.3,
-        dens_var_shift=0.1,
         disconnection_distance=None,
         precomputed_knn=(None, None, None),
     ):
@@ -986,10 +595,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         self.transform_seed = transform_seed
         self.force_approximation_algorithm = force_approximation_algorithm
 
-        self.densmap = densmap
-        self.dens_lambda = dens_lambda
-        self.dens_frac = dens_frac
-        self.dens_var_shift = dens_var_shift
         self.disconnection_distance = disconnection_distance
         self.precomputed_knn = precomputed_knn
 
@@ -1106,12 +711,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
                     "To enable using inverse_transform method, define a distance function that returns a tuple "
                     "of (distance [float], gradient [np.array])"
                 )
-        elif self.metric == "precomputed":
-            if self.unique:
-                raise ValueError("unique is poorly defined on a precomputed metric")
-            warn("using precomputed metric; inverse_transform will be unavailable")
-            self._input_distance_func = self.metric
-            self._inverse_distance_func = None
         elif self.metric == "hellinger" and self._raw_data.min() < 0:
             raise ValueError("Metric 'hellinger' does not support negative values")
         elif self.metric in dist.named_distances:
@@ -1206,19 +805,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             raise ValueError("dens_frac must be between 0.0 and 1.0")
         if self.dens_var_shift < 0.0:
             raise ValueError("dens_var_shift cannot be negative")
-
-        self._densmap_kwds = {
-            "lambda": self.dens_lambda if self.densmap else 0.0,
-            "frac": self.dens_frac if self.densmap else 0.0,
-            "var_shift": self.dens_var_shift,
-            "n_neighbors": self.n_neighbors,
-        }
-
-        if self.densmap:
-            if self.output_metric not in ("euclidean", "l2"):
-                raise ValueError(
-                    "Non-Euclidean output metric not supported for densMAP."
-                )
 
         # This will be used to prune all edges of greater than a fixed value from our knn graph.
         # We have preset defaults described in DISCONNECTION_DISTANCES for our bounded measures.
@@ -1366,9 +952,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
 
         random_state = check_random_state(self.random_state)
 
-        # Standard case
-        self._small_data = False
-        # Standard case
         nn_metric = self._input_distance_func
         self._knn_indices = self.knn_indices
         self._knn_dists = self.knn_dists
@@ -1414,9 +997,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
 
         self._supervised = False
 
-        if self.densmap or self.output_dens:
-            self._densmap_kwds["graph_dists"] = self.graph_dists_
-
         epochs = (
             self.n_epochs_list if self.n_epochs_list is not None else self.n_epochs
         )
@@ -1454,8 +1034,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         if self.output_dens:
             self.rad_orig_ = aux_data["rad_orig"][inverse]
             self.rad_emb_ = aux_data["rad_emb"][inverse]
-
-        self._input_hash = joblib.hash(self._raw_data)
 
         # Set number of features out for sklearn API
         self._n_features_out = self.embedding_.shape[1]
@@ -1496,15 +1074,12 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         self.fit(X, **kwargs)
         return self.embedding_
 
-    def transform(self, X, ensure_all_finite=True):
+    def transform(self, X):
         # If we fit just a single instance then error
         if self._raw_data.shape[0] == 1:
             raise ValueError(
                 "Transform unavailable when model was fit with only a single data sample."
             )
-        x_hash = joblib.hash(X)
-        if x_hash == self._input_hash:
-            return self.embedding_
 
         # #848: knn_search_index is allowed to be None if not transforming new data,
         # so now we must validate that if it exists it is not None
