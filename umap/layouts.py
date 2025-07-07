@@ -250,10 +250,6 @@ def optimize_layout_euclidean(
     initial_alpha=1.0,
     negative_sample_rate=5.0,
     parallel=False,
-    verbose=False,
-    densmap=False,
-    densmap_kwds=None,
-    tqdm_kwds=None,
     move_other=False,
 ):
     """Improve an embedding using stochastic gradient descent to minimize the
@@ -328,32 +324,12 @@ def optimize_layout_euclidean(
     # a lot of time in compilation step (first call to numba function)
     optimize_fn = _get_optimize_layout_euclidean_single_epoch_fn(parallel)
 
-    if densmap_kwds is None:
-        densmap_kwds = {}
-    if tqdm_kwds is None:
-        tqdm_kwds = {}
-
-    if densmap:
-        dens_init_fn = numba.njit(
-            _optimize_layout_euclidean_densmap_epoch_init,
-            fastmath=True,
-            parallel=parallel,
-        )
-
-        dens_mu_tot = np.sum(densmap_kwds["mu_sum"]) / 2
-        dens_lambda = densmap_kwds["lambda"]
-        dens_R = densmap_kwds["R"]
-        dens_mu = densmap_kwds["mu"]
-        dens_phi_sum = np.zeros(n_vertices, dtype=np.float32)
-        dens_re_sum = np.zeros(n_vertices, dtype=np.float32)
-        dens_var_shift = densmap_kwds["var_shift"]
-    else:
-        dens_mu_tot = 0
-        dens_lambda = 0
-        dens_R = np.zeros(1, dtype=np.float32)
-        dens_mu = np.zeros(1, dtype=np.float32)
-        dens_phi_sum = np.zeros(1, dtype=np.float32)
-        dens_re_sum = np.zeros(1, dtype=np.float32)
+    dens_mu_tot = 0
+    dens_lambda = 0
+    dens_R = np.zeros(1, dtype=np.float32)
+    dens_mu = np.zeros(1, dtype=np.float32)
+    dens_phi_sum = np.zeros(1, dtype=np.float32)
+    dens_re_sum = np.zeros(1, dtype=np.float32)
 
     epochs_list = None
     embedding_list = []
@@ -361,42 +337,14 @@ def optimize_layout_euclidean(
         epochs_list = n_epochs
         n_epochs = max(epochs_list)
 
-    if "disable" not in tqdm_kwds:
-        tqdm_kwds["disable"] = not verbose
-
     rng_state_per_sample = np.full(
         (head_embedding.shape[0], len(rng_state)), rng_state, dtype=np.int64
     ) + head_embedding[:, 0].astype(np.float64).view(np.int64).reshape(-1, 1)
 
-    for n in tqdm(range(n_epochs), **tqdm_kwds):
-        densmap_flag = (
-            densmap
-            and (densmap_kwds["lambda"] > 0)
-            and (((n + 1) / float(n_epochs)) > (1 - densmap_kwds["frac"]))
-        )
-
-        if densmap_flag:
-            # FIXME: dens_init_fn might be referenced before assignment
-
-            dens_init_fn(
-                head_embedding,
-                tail_embedding,
-                head,
-                tail,
-                a,
-                b,
-                dens_re_sum,
-                dens_phi_sum,
-            )
-
-            # FIXME: dens_var_shift might be referenced before assignment
-            dens_re_std = np.sqrt(np.var(dens_re_sum) + dens_var_shift)
-            dens_re_mean = np.mean(dens_re_sum)
-            dens_re_cov = np.dot(dens_re_sum, dens_R) / (n_vertices - 1)
-        else:
-            dens_re_std = 0
-            dens_re_mean = 0
-            dens_re_cov = 0
+    for n in tqdm(range(n_epochs)):
+        dens_re_std = 0
+        dens_re_mean = 0
+        dens_re_cov = 0
 
         optimize_fn(
             head_embedding,
@@ -429,9 +377,6 @@ def optimize_layout_euclidean(
         )
 
         alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
-
-        if verbose and n % int(n_epochs / 10) == 0:
-            print("\tcompleted ", n, " / ", n_epochs, "epochs")
 
         if epochs_list is not None and n in epochs_list:
             embedding_list.append(head_embedding.copy())

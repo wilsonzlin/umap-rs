@@ -4,7 +4,6 @@ from warnings import warn
 from scipy.optimize import curve_fit
 from sklearn.base import BaseEstimator, ClassNamePrefixFeaturesOutMixin
 from sklearn.utils import check_random_state
-from sklearn.preprocessing import normalize
 from sklearn.neighbors import KDTree
 
 import numpy as np
@@ -197,59 +196,15 @@ def compute_membership_strengths(
     knn_dists,
     sigmas,
     rhos,
-    return_dists=False,
     bipartite=False,
 ):
-    """Construct the membership strength data for the 1-skeleton of each local
-    fuzzy simplicial set -- this is formed as a sparse matrix where each row is
-    a local fuzzy simplicial set, with a membership strength for the
-    1-simplex to each other data point.
-
-    Parameters
-    ----------
-    knn_indices: array of shape (n_samples, n_neighbors)
-        The indices on the ``n_neighbors`` closest points in the dataset.
-
-    knn_dists: array of shape (n_samples, n_neighbors)
-        The distances to the ``n_neighbors`` closest points in the dataset.
-
-    sigmas: array of shape(n_samples)
-        The normalization factor derived from the metric tensor approximation.
-
-    rhos: array of shape(n_samples)
-        The local connectivity adjustment.
-
-    return_dists: bool (optional, default False)
-        Whether to return the pairwise distance associated with each edge.
-
-    bipartite: bool (optional, default False)
-        Does the nearest neighbour set represent a bipartite graph? That is, are the
-        nearest neighbour indices from the same point set as the row indices?
-
-    Returns
-    -------
-    rows: array of shape (n_samples * n_neighbors)
-        Row data for the resulting sparse matrix (coo format)
-
-    cols: array of shape (n_samples * n_neighbors)
-        Column data for the resulting sparse matrix (coo format)
-
-    vals: array of shape (n_samples * n_neighbors)
-        Entries for the resulting sparse matrix (coo format)
-
-    dists: array of shape (n_samples * n_neighbors)
-        Distance associated with each entry in the resulting sparse matrix
-    """
     n_samples = knn_indices.shape[0]
     n_neighbors = knn_indices.shape[1]
 
     rows = np.zeros(knn_indices.size, dtype=np.int32)
     cols = np.zeros(knn_indices.size, dtype=np.int32)
     vals = np.zeros(knn_indices.size, dtype=np.float32)
-    if return_dists:
-        dists = np.zeros(knn_indices.size, dtype=np.float32)
-    else:
-        dists = None
+    dists = None
 
     for i in range(n_samples):
         for j in range(n_neighbors):
@@ -267,8 +222,6 @@ def compute_membership_strengths(
             rows[i * n_neighbors + j] = i
             cols[i * n_neighbors + j] = knn_indices[i, j]
             vals[i * n_neighbors + j] = val
-            if return_dists:
-                dists[i * n_neighbors + j] = knn_dists[i, j]
 
     return rows, cols, vals, dists
 
@@ -285,8 +238,6 @@ def fuzzy_simplicial_set(
     set_op_mix_ratio=1.0,
     local_connectivity=1.0,
     apply_set_operations=True,
-    verbose=False,
-    return_dists=None,
 ):
     knn_dists = knn_dists.astype(np.float32)
 
@@ -297,7 +248,7 @@ def fuzzy_simplicial_set(
     )
 
     rows, cols, vals, dists = compute_membership_strengths(
-        knn_indices, knn_dists, sigmas, rhos, return_dists
+        knn_indices, knn_dists, sigmas, rhos
     )
 
     result = scipy.sparse.coo_matrix(
@@ -317,19 +268,9 @@ def fuzzy_simplicial_set(
 
     result.eliminate_zeros()
 
-    if return_dists is None:
-        return result, sigmas, rhos
-    else:
-        if return_dists:
-            dmat = scipy.sparse.coo_matrix(
-                (dists, (rows, cols)), shape=(X.shape[0], X.shape[0])
-            )
+    dists = None
 
-            dists = dmat.maximum(dmat.transpose()).todok()
-        else:
-            dists = None
-
-        return result, sigmas, rhos, dists
+    return result, sigmas, rhos, dists
 
 
 def make_epochs_per_sample(weights, n_epochs):
@@ -368,9 +309,6 @@ def simplicial_set_embedding(
     random_state,
     metric,
     metric_kwds,
-    densmap,
-    densmap_kwds,
-    output_dens,
     output_metric=dist.named_distances_with_gradients["euclidean"],
     output_metric_kwds={},
     euclidean_output=True,
@@ -912,8 +850,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self.set_op_mix_ratio,
             self.local_connectivity,
             True,
-            self.verbose,
-            self.densmap or self.output_dens,
         )
         # Report the number of vertices with degree 0 in our umap.graph_
         # This ensures that they were properly disconnected.
@@ -962,9 +898,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             )
 
         self.embedding_ = self.embedding_[inverse]
-        if self.output_dens:
-            self.rad_orig_ = aux_data["rad_orig"][inverse]
-            self.rad_emb_ = aux_data["rad_emb"][inverse]
 
         # Set number of features out for sklearn API
         self._n_features_out = self.embedding_.shape[1]
@@ -990,15 +923,9 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             random_state,
             self._input_distance_func,
             self._metric_kwds,
-            self.densmap,
-            self._densmap_kwds,
-            self.output_dens,
             self._output_distance_func,
             self._output_metric_kwds,
             self.output_metric in ("euclidean", "l2"),
-            self.random_state is None,
-            self.verbose,
-            tqdm_kwds=self.tqdm_kwds,
         )
 
     def fit_transform(self, X, **kwargs):
