@@ -296,9 +296,7 @@ def make_epochs_per_sample(weights, n_epochs):
 
 
 def simplicial_set_embedding(
-    data,
     graph,
-    n_components,
     initial_alpha,
     a,
     b,
@@ -307,8 +305,6 @@ def simplicial_set_embedding(
     n_epochs,
     init,
     random_state,
-    metric,
-    metric_kwds,
     output_metric=dist.named_distances_with_gradients["euclidean"],
     output_metric_kwds={},
     euclidean_output=True,
@@ -380,10 +376,6 @@ def simplicial_set_embedding(
             initial_alpha,
             negative_sample_rate,
             parallel=parallel,
-            verbose=verbose,
-            densmap=densmap,
-            densmap_kwds=densmap_kwds,
-            tqdm_kwds=tqdm_kwds,
             move_other=True,
         )
     else:
@@ -403,8 +395,6 @@ def simplicial_set_embedding(
             negative_sample_rate,
             output_metric,
             tuple(output_metric_kwds.values()),
-            verbose=verbose,
-            tqdm_kwds=tqdm_kwds,
             move_other=True,
         )
 
@@ -910,9 +900,7 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         through .fit() and .fit_transform().
         """
         return simplicial_set_embedding(
-            X,
             self.graph_,
-            self.n_components,
             self._initial_alpha,
             self._a,
             self._b,
@@ -921,8 +909,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             n_epochs,
             init,
             random_state,
-            self._input_distance_func,
-            self._metric_kwds,
             self._output_distance_func,
             self._output_metric_kwds,
             self.output_metric in ("euclidean", "l2"),
@@ -1021,8 +1007,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
                 self._initial_alpha / 4.0,
                 self.negative_sample_rate,
                 self.random_state is None,
-                verbose=self.verbose,
-                tqdm_kwds=self.tqdm_kwds,
             )
         else:
             embedding = optimize_layout_generic(

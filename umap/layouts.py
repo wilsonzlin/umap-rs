@@ -78,16 +78,6 @@ def _optimize_layout_euclidean_single_epoch(
     epoch_of_next_negative_sample,
     epoch_of_next_sample,
     n,
-    densmap_flag,
-    dens_phi_sum,
-    dens_re_sum,
-    dens_re_cov,
-    dens_re_std,
-    dens_re_mean,
-    dens_lambda,
-    dens_R,
-    dens_mu,
-    dens_mu_tot,
 ):
     for i in numba.prange(epochs_per_sample.shape[0]):
         if epoch_of_next_sample[i] <= n:
@@ -99,40 +89,6 @@ def _optimize_layout_euclidean_single_epoch(
 
             dist_squared = rdist(current, other)
 
-            if densmap_flag:
-                phi = 1.0 / (1.0 + a * pow(dist_squared, b))
-                dphi_term = (
-                    a * b * pow(dist_squared, b - 1) / (1.0 + a * pow(dist_squared, b))
-                )
-
-                q_jk = phi / dens_phi_sum[k]
-                q_kj = phi / dens_phi_sum[j]
-
-                drk = q_jk * (
-                    (1.0 - b * (1 - phi)) / np.exp(dens_re_sum[k]) + dphi_term
-                )
-                drj = q_kj * (
-                    (1.0 - b * (1 - phi)) / np.exp(dens_re_sum[j]) + dphi_term
-                )
-
-                re_std_sq = dens_re_std * dens_re_std
-                weight_k = (
-                    dens_R[k]
-                    - dens_re_cov * (dens_re_sum[k] - dens_re_mean) / re_std_sq
-                )
-                weight_j = (
-                    dens_R[j]
-                    - dens_re_cov * (dens_re_sum[j] - dens_re_mean) / re_std_sq
-                )
-
-                grad_cor_coeff = (
-                    dens_lambda
-                    * dens_mu_tot
-                    * (weight_k * drk + weight_j * drj)
-                    / (dens_mu[i] * dens_re_std)
-                    / n_vertices
-                )
-
             if dist_squared > 0.0:
                 grad_coeff = -2.0 * a * b * pow(dist_squared, b - 1.0)
                 grad_coeff /= a * pow(dist_squared, b) + 1.0
@@ -141,11 +97,6 @@ def _optimize_layout_euclidean_single_epoch(
 
             for d in range(dim):
                 grad_d = clip(grad_coeff * (current[d] - other[d]))
-
-                if densmap_flag:
-                    # FIXME: grad_cor_coeff might be referenced before assignment
-
-                    grad_d += clip(2 * grad_cor_coeff * (current[d] - other[d]))
 
                 current[d] += grad_d * alpha
                 if move_other:
@@ -184,39 +135,6 @@ def _optimize_layout_euclidean_single_epoch(
             epoch_of_next_negative_sample[i] += (
                 n_neg_samples * epochs_per_negative_sample[i]
             )
-
-
-def _optimize_layout_euclidean_densmap_epoch_init(
-    head_embedding,
-    tail_embedding,
-    head,
-    tail,
-    a,
-    b,
-    re_sum,
-    phi_sum,
-):
-    re_sum.fill(0)
-    phi_sum.fill(0)
-
-    for i in numba.prange(head.size):
-        j = head[i]
-        k = tail[i]
-
-        current = head_embedding[j]
-        other = tail_embedding[k]
-        dist_squared = rdist(current, other)
-
-        phi = 1.0 / (1.0 + a * pow(dist_squared, b))
-
-        re_sum[j] += phi * dist_squared
-        re_sum[k] += phi * dist_squared
-        phi_sum[j] += phi
-        phi_sum[k] += phi
-
-    epsilon = 1e-8
-    for i in range(re_sum.size):
-        re_sum[i] = np.log(epsilon + (re_sum[i] / phi_sum[i]))
 
 
 _nb_optimize_layout_euclidean_single_epoch = numba.njit(
@@ -324,13 +242,6 @@ def optimize_layout_euclidean(
     # a lot of time in compilation step (first call to numba function)
     optimize_fn = _get_optimize_layout_euclidean_single_epoch_fn(parallel)
 
-    dens_mu_tot = 0
-    dens_lambda = 0
-    dens_R = np.zeros(1, dtype=np.float32)
-    dens_mu = np.zeros(1, dtype=np.float32)
-    dens_phi_sum = np.zeros(1, dtype=np.float32)
-    dens_re_sum = np.zeros(1, dtype=np.float32)
-
     epochs_list = None
     embedding_list = []
     if isinstance(n_epochs, list):
@@ -342,10 +253,6 @@ def optimize_layout_euclidean(
     ) + head_embedding[:, 0].astype(np.float64).view(np.int64).reshape(-1, 1)
 
     for n in tqdm(range(n_epochs)):
-        dens_re_std = 0
-        dens_re_mean = 0
-        dens_re_cov = 0
-
         optimize_fn(
             head_embedding,
             tail_embedding,
@@ -364,16 +271,6 @@ def optimize_layout_euclidean(
             epoch_of_next_negative_sample,
             epoch_of_next_sample,
             n,
-            densmap_flag,
-            dens_phi_sum,
-            dens_re_sum,
-            dens_re_cov,
-            dens_re_std,
-            dens_re_mean,
-            dens_lambda,
-            dens_R,
-            dens_mu,
-            dens_mu_tot,
         )
 
         alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
@@ -486,8 +383,6 @@ def optimize_layout_generic(
     negative_sample_rate=5.0,
     output_metric=dist.euclidean,
     output_metric_kwds=(),
-    verbose=False,
-    tqdm_kwds=None,
     move_other=False,
 ):
     """Improve an embedding using stochastic gradient descent to minimize the
@@ -568,17 +463,11 @@ def optimize_layout_generic(
         fastmath=True,
     )
 
-    if tqdm_kwds is None:
-        tqdm_kwds = {}
-
-    if "disable" not in tqdm_kwds:
-        tqdm_kwds["disable"] = not verbose
-
     rng_state_per_sample = np.full(
         (head_embedding.shape[0], len(rng_state)), rng_state, dtype=np.int64
     ) + head_embedding[:, 0].astype(np.float64).view(np.int64).reshape(-1, 1)
 
-    for n in tqdm(range(n_epochs), **tqdm_kwds):
+    for n in tqdm(range(n_epochs)):
         optimize_fn(
             epochs_per_sample,
             epoch_of_next_sample,
@@ -598,220 +487,6 @@ def optimize_layout_generic(
             n_vertices,
             a,
             b,
-            gamma,
-        )
-        alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
-
-    return head_embedding
-
-
-def _optimize_layout_inverse_single_epoch(
-    epochs_per_sample,
-    epoch_of_next_sample,
-    head,
-    tail,
-    head_embedding,
-    tail_embedding,
-    output_metric,
-    output_metric_kwds,
-    weight,
-    sigmas,
-    dim,
-    alpha,
-    move_other,
-    n,
-    epoch_of_next_negative_sample,
-    epochs_per_negative_sample,
-    rng_state,
-    n_vertices,
-    rhos,
-    gamma,
-):
-    for i in range(epochs_per_sample.shape[0]):
-        if epoch_of_next_sample[i] <= n:
-            j = head[i]
-            k = tail[i]
-
-            current = head_embedding[j]
-            other = tail_embedding[k]
-
-            dist_output, grad_dist_output = output_metric(
-                current, other, *output_metric_kwds
-            )
-
-            w_l = weight[i]
-            grad_coeff = -(1 / (w_l * sigmas[k] + 1e-6))
-
-            for d in range(dim):
-                grad_d = clip(grad_coeff * grad_dist_output[d])
-
-                current[d] += grad_d * alpha
-                if move_other:
-                    other[d] += -grad_d * alpha
-
-            epoch_of_next_sample[i] += epochs_per_sample[i]
-
-            n_neg_samples = int(
-                (n - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]
-            )
-
-            for p in range(n_neg_samples):
-                k = tau_rand_int(rng_state) % n_vertices
-
-                other = tail_embedding[k]
-
-                dist_output, grad_dist_output = output_metric(
-                    current, other, *output_metric_kwds
-                )
-
-                # w_l = 0.0 # for negative samples, the edge does not exist
-                w_h = np.exp(-max(dist_output - rhos[k], 1e-6) / (sigmas[k] + 1e-6))
-                grad_coeff = -gamma * ((0 - w_h) / ((1 - w_h) * sigmas[k] + 1e-6))
-
-                for d in range(dim):
-                    grad_d = clip(grad_coeff * grad_dist_output[d])
-                    current[d] += grad_d * alpha
-
-            epoch_of_next_negative_sample[i] += (
-                n_neg_samples * epochs_per_negative_sample[i]
-            )
-
-
-def optimize_layout_inverse(
-    head_embedding,
-    tail_embedding,
-    head,
-    tail,
-    weight,
-    sigmas,
-    rhos,
-    n_epochs,
-    n_vertices,
-    epochs_per_sample,
-    a,
-    b,
-    rng_state,
-    gamma=1.0,
-    initial_alpha=1.0,
-    negative_sample_rate=5.0,
-    output_metric=dist.euclidean,
-    output_metric_kwds=(),
-    verbose=False,
-    tqdm_kwds=None,
-    move_other=False,
-):
-    """Improve an embedding using stochastic gradient descent to minimize the
-    fuzzy set cross entropy between the 1-skeletons of the high dimensional
-    and low dimensional fuzzy simplicial sets. In practice this is done by
-    sampling edges based on their membership strength (with the (1-p) terms
-    coming from negative sampling similar to word2vec).
-
-    Parameters
-    ----------
-    head_embedding: array of shape (n_samples, n_components)
-        The initial embedding to be improved by SGD.
-
-    tail_embedding: array of shape (source_samples, n_components)
-        The reference embedding of embedded points. If not embedding new
-        previously unseen points with respect to an existing embedding this
-        is simply the head_embedding (again); otherwise it provides the
-        existing embedding to embed with respect to.
-
-    head: array of shape (n_1_simplices)
-        The indices of the heads of 1-simplices with non-zero membership.
-
-    tail: array of shape (n_1_simplices)
-        The indices of the tails of 1-simplices with non-zero membership.
-
-    weight: array of shape (n_1_simplices)
-        The membership weights of the 1-simplices.
-
-    sigmas:
-
-    rhos:
-
-    n_epochs: int
-        The number of training epochs to use in optimization.
-
-    n_vertices: int
-        The number of vertices (0-simplices) in the dataset.
-
-    epochs_per_sample: array of shape (n_1_simplices)
-        A float value of the number of epochs per 1-simplex. 1-simplices with
-        weaker membership strength will have more epochs between being sampled.
-
-    a: float
-        Parameter of differentiable approximation of right adjoint functor
-
-    b: float
-        Parameter of differentiable approximation of right adjoint functor
-
-    rng_state: array of int64, shape (3,)
-        The internal state of the rng
-
-    gamma: float (optional, default 1.0)
-        Weight to apply to negative samples.
-
-    initial_alpha: float (optional, default 1.0)
-        Initial learning rate for the SGD.
-
-    negative_sample_rate: int (optional, default 5)
-        Number of negative samples to use per positive sample.
-
-    verbose: bool (optional, default False)
-        Whether to report information on the current progress of the algorithm.
-
-    tqdm_kwds: dict (optional, default None)
-        Keyword arguments for tqdm progress bar.
-
-    move_other: bool (optional, default False)
-        Whether to adjust tail_embedding alongside head_embedding
-
-    Returns
-    -------
-    embedding: array of shape (n_samples, n_components)
-        The optimized embedding.
-    """
-
-    dim = head_embedding.shape[1]
-    alpha = initial_alpha
-
-    epochs_per_negative_sample = epochs_per_sample / negative_sample_rate
-    epoch_of_next_negative_sample = epochs_per_negative_sample.copy()
-    epoch_of_next_sample = epochs_per_sample.copy()
-
-    optimize_fn = numba.njit(
-        _optimize_layout_inverse_single_epoch,
-        fastmath=True,
-    )
-
-    if tqdm_kwds is None:
-        tqdm_kwds = {}
-
-    if "disable" not in tqdm_kwds:
-        tqdm_kwds["disable"] = not verbose
-
-    for n in tqdm(range(n_epochs), **tqdm_kwds):
-        optimize_fn(
-            epochs_per_sample,
-            epoch_of_next_sample,
-            head,
-            tail,
-            head_embedding,
-            tail_embedding,
-            output_metric,
-            output_metric_kwds,
-            weight,
-            sigmas,
-            dim,
-            alpha,
-            move_other,
-            n,
-            epoch_of_next_negative_sample,
-            epochs_per_negative_sample,
-            rng_state,
-            n_vertices,
-            rhos,
             gamma,
         )
         alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
