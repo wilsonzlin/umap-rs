@@ -612,16 +612,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             raise ValueError("min_dist cannot be negative")
         if not isinstance(self.init, str) and not isinstance(self.init, np.ndarray):
             raise ValueError("init must be a string or ndarray")
-        if isinstance(self.init, str) and self.init not in (
-            "pca",
-            "spectral",
-            "random",
-            "tswspectral",
-        ):
-            raise ValueError(
-                'string init values must be one of: "pca", "tswspectral",'
-                ' "spectral" or "random"'
-            )
         if (
             isinstance(self.init, np.ndarray)
             and self.init.shape[1] != self.n_components
@@ -683,12 +673,7 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self._target_metric_kwds = {}
         else:
             self._target_metric_kwds = self.target_metric_kwds
-        # check sparsity of data upfront to set proper _input_distance_func &
-        # save repeated checks later on
-        if scipy.sparse.isspmatrix_csr(self._raw_data):
-            self._sparse_data = True
-        else:
-            self._sparse_data = False
+        self._sparse_data = False
         # set input distance metric & inverse_transform distance metric
         if callable(self.metric):
             in_returns_grad = self._check_custom_metric(
@@ -714,17 +699,7 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         elif self.metric == "hellinger" and self._raw_data.min() < 0:
             raise ValueError("Metric 'hellinger' does not support negative values")
         elif self.metric in dist.named_distances:
-            if self._sparse_data:
-                if self.metric in sparse.sparse_named_distances:
-                    self._input_distance_func = sparse.sparse_named_distances[
-                        self.metric
-                    ]
-                else:
-                    raise ValueError(
-                        "Metric {} is not supported for sparse data".format(self.metric)
-                    )
-            else:
-                self._input_distance_func = dist.named_distances[self.metric]
+            self._input_distance_func = dist.named_distances[self.metric]
             try:
                 self._inverse_distance_func = dist.named_distances_with_gradients[
                     self.metric
@@ -736,15 +711,7 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
                 )
                 self._inverse_distance_func = None
         elif self.metric in pynn_named_distances:
-            if self._sparse_data:
-                if self.metric in pynn_sparse_named_distances:
-                    self._input_distance_func = pynn_sparse_named_distances[self.metric]
-                else:
-                    raise ValueError(
-                        "Metric {} is not supported for sparse data".format(self.metric)
-                    )
-            else:
-                self._input_distance_func = pynn_named_distances[self.metric]
+            self._input_distance_func = pynn_named_distances[self.metric]
 
             warn(
                 "gradient function is not yet implemented for {} distance metric; "
@@ -791,21 +758,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         ):
             self.angular_rp_forest = True
 
-        if self.n_jobs < -1 or self.n_jobs == 0:
-            raise ValueError("n_jobs must be a postive integer, or -1 (for all cores)")
-        if self.n_jobs != 1 and self.random_state is not None:
-            self.n_jobs = 1
-            warn(
-                f"n_jobs value {self.n_jobs} overridden to 1 by setting random_state. Use no seed for parallelism."
-            )
-
-        if self.dens_lambda < 0.0:
-            raise ValueError("dens_lambda cannot be negative")
-        if self.dens_frac < 0.0 or self.dens_frac > 1.0:
-            raise ValueError("dens_frac must be between 0.0 and 1.0")
-        if self.dens_var_shift < 0.0:
-            raise ValueError("dens_var_shift cannot be negative")
-
         # This will be used to prune all edges of greater than a fixed value from our knn graph.
         # We have preset defaults described in DISCONNECTION_DISTANCES for our bounded measures.
         # Otherwise a user can pass in their own value.
@@ -836,10 +788,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self.tqdm_kwds["bar_format"] = bar_f
 
         if hasattr(self, "knn_dists") and self.knn_dists is not None:
-            if self.unique:
-                raise ValueError(
-                    "unique is not currently available for " "precomputed_knn."
-                )
             if not isinstance(self.knn_indices, np.ndarray):
                 raise ValueError("precomputed_knn[0] must be ndarray object.")
             if not isinstance(self.knn_dists, np.ndarray):
@@ -907,21 +855,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
         return hasattr(metric_out, "__iter__") and len(metric_out) == 2
 
     def fit(self, X, **kwargs):
-        """Fit X into an embedded space.
-
-        Optionally use y for supervised dimension reduction.
-
-        Parameters
-        ----------
-        X : array, shape (n_samples, n_features) or (n_samples, n_samples)
-            If the metric is 'precomputed' X must be a square distance
-            matrix. Otherwise it contains a sample per row. If the method
-            is 'exact', X may be a sparse matrix of type 'csr', 'csc'
-            or 'coo'.
-
-        **kwargs : optional
-            Any additional keyword arguments are passed to _fit_embed_data.
-        """
         self._raw_data = X
 
         # Handle all the optional arguments, setting default
@@ -994,8 +927,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self._raw_data.shape[0],
             verbose=self.verbose,
         )
-
-        self._supervised = False
 
         epochs = (
             self.n_epochs_list if self.n_epochs_list is not None else self.n_epochs
