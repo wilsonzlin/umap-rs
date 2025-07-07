@@ -601,7 +601,6 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             self._target_metric_kwds = {}
         else:
             self._target_metric_kwds = self.target_metric_kwds
-        self._sparse_data = False
         # set input distance metric & inverse_transform distance metric
         if callable(self.metric):
             in_returns_grad = self._check_custom_metric(
@@ -775,10 +774,7 @@ class UMAP(BaseEstimator, ClassNamePrefixFeaturesOutMixin):
             # reasonable interval with output dimensionality
             x, y = np.random.uniform(low=-10, high=10, size=(2, self.n_components))
 
-        if scipy.sparse.issparse(data):
-            metric_out = metric(x.indices, x.data, y.indices, y.data, **kwds)
-        else:
-            metric_out = metric(x, y, **kwds)
+        metric_out = metric(x, y, **kwds)
         # True if metric returns iterable of length 2, False otherwise
         return hasattr(metric_out, "__iter__") and len(metric_out) == 2
 
