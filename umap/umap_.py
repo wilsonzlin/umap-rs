@@ -3,8 +3,7 @@ from warnings import warn
 
 from scipy.optimize import curve_fit
 from sklearn.base import BaseEstimator, ClassNamePrefixFeaturesOutMixin
-from sklearn.utils import check_array, check_random_state
-from sklearn.metrics import pairwise_distances
+from sklearn.utils import check_random_state
 from sklearn.preprocessing import normalize
 from sklearn.neighbors import KDTree
 
@@ -13,19 +12,9 @@ import scipy.sparse
 import scipy.sparse.csgraph
 import numba
 
-import umap.distances as dist
-
-import umap.sparse as sparse
-
-from umap.utils import (
-    submatrix,
-    ts,
-)
-from umap.spectral import spectral_layout, tswspectral_layout
 from umap.layouts import (
     optimize_layout_euclidean,
     optimize_layout_generic,
-    optimize_layout_inverse,
 )
 
 locale.setlocale(locale.LC_NUMERIC, "C")
