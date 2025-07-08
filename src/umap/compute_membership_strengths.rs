@@ -1,6 +1,6 @@
 use dashmap::DashSet;
-use derive_builder::Builder;
 use ndarray::{Array1, ArrayView1, ArrayView2};
+use typed_builder::TypedBuilder;
 
 /*
   Construct the membership strength data for the 1-skeleton of each local
@@ -43,7 +43,7 @@ use ndarray::{Array1, ArrayView1, ArrayView2};
   dists: array of shape (n_samples * n_neighbors)
       Distance associated with each entry in the resulting sparse matrix
 */
-#[derive(Builder)]
+#[derive(TypedBuilder)]
 pub struct ComputeMembershipStrengths<'a> {
   knn_indices: &'a ArrayView2<'a, u32>,
   knn_dists: &'a ArrayView2<'a, f32>,
@@ -51,7 +51,7 @@ pub struct ComputeMembershipStrengths<'a> {
   knn_disconnections: &'a DashSet<(usize, usize)>,
   sigmas: &'a ArrayView1<'a, f32>,
   rhos: &'a ArrayView1<'a, f32>,
-  #[builder(default = "false")]
+  #[builder(default = false)]
   bipartite: bool,
 }
 

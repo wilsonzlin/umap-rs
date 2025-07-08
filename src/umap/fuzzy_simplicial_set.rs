@@ -1,11 +1,12 @@
 use std::iter::zip;
 
-use derive_builder::Builder;
-use ndarray::ArrayView2;
-use sprs::{CsMat, TriMat};
+use dashmap::DashSet;
+use itertools::izip;
+use ndarray::{Array1, ArrayView2};
+use sprs::{CsMat, CsMatView, TriMat};
+use typed_builder::TypedBuilder;
 
-use crate::umap::{compute_membership_strengths::compute_membership_strengths, smooth_knn_dist::SmoothKnnDistBuilder};
-
+use crate::umap::{compute_membership_strengths::{ComputeMembershipStrengths, ComputeMembershipStrengthsBuilder}, smooth_knn_dist::{SmoothKnnDist, SmoothKnnDistBuilder}};
 
 /*
   Given a set of data X, a neighborhood size, and a measure of distance
@@ -25,9 +26,6 @@ use crate::umap::{compute_membership_strengths::compute_membership_strengths, sm
       Larger numbers induce more global estimates of the manifold that can
       miss finer detail, while smaller values will focus on fine manifold
       structure to the detriment of the larger picture.
-
-  random_state: numpy RandomState or equivalent
-      A state capable being used as a numpy random state.
 
   knn_indices: array of shape (n_samples, n_neighbors) (optional)
       If the k-nearest neighbors of each point has already been calculated
@@ -69,51 +67,56 @@ use crate::umap::{compute_membership_strengths::compute_membership_strengths, sm
       j) entry of the matrix represents the membership strength of the
       1-simplex between the ith and jth sample points.
 */
-#[derive(Builder, Debug)]
-#[builder(setter(into))]
+#[derive(TypedBuilder, Debug)]
 pub struct FuzzySimplicialSet<'a> {
   X: &'a ArrayView2<'a, f32>,
   n_neighbors: usize,
   knn_indices: &'a ArrayView2<'a, u32>,
   knn_dists: &'a ArrayView2<'a, f32>,
-  #[builder(default = "1.0")]
+  knn_disconnections: &'a DashSet<(usize, usize)>,
+  #[builder(default = 1.0)]
   set_op_mix_ratio: f32,
-  #[builder(default = "1.0")]
+  #[builder(default = 1.0)]
   local_connectivity: f32,
-  #[builder(default = "true")]
+  #[builder(default = true)]
   apply_set_operations: bool,
 }
 
 impl<'a> FuzzySimplicialSet<'a> {
-  pub fn exec(self) {
+  pub fn exec(self) -> (CsMat<f32>, Array1<f32>, Array1<f32>) {
     let Self {
       X,
       n_neighbors,
       knn_indices,
       knn_dists,
+      knn_disconnections,
       set_op_mix_ratio,
       local_connectivity,
       apply_set_operations,
     } = self;
 
-    let (sigmas, rhos) = SmoothKnnDistBuilder::default()
+    let (sigmas, rhos) = SmoothKnnDist::builder()
       .distances(knn_dists)
       .k(n_neighbors)
       .local_connectivity(local_connectivity)
       .build()
-      .unwrap()
       .exec();
 
-    let (rows, cols, vals) = compute_membership_strengths(
-        knn_indices, knn_dists, &sigmas.view(), &rhos.view(), false
-    );
+    let (rows, cols, vals) = ComputeMembershipStrengths::builder()
+      .knn_indices(knn_indices)
+      .knn_dists(knn_dists)
+      .knn_disconnections(knn_disconnections)
+      .rhos(&rhos.view())
+      .sigmas(&sigmas.view())
+      .build()
+      .exec();
 
     let mut result = {
       let n = X.shape()[0];
       let mat = TriMat::new((n, n));
-      for (v, r, c) in zip!(vals, rows, cols) {
+      for (v, r, c) in izip!(vals, rows, cols) {
         if v != 0.0 {
-          mat.add_triplet(r, c, v);
+          mat.add_triplet(r as usize, c as usize, v);
         }
       };
       mat.to_csc()
@@ -122,12 +125,11 @@ impl<'a> FuzzySimplicialSet<'a> {
     if apply_set_operations {
         let transpose = result.transpose_view().to_csr();
 
-        let prod_matrix = hadamard(&result, &transpose);
+        let prod_matrix = hadamard(&result.view(), &transpose.view());
 
-        result = (
+        result =
             set_op_mix_ratio * (result + transpose - prod_matrix)
-            + (1.0 - set_op_mix_ratio) * prod_matrix
-        );
+            + (1.0 - set_op_mix_ratio) * prod_matrix;
     }
 
     result.eliminate_zeros();
@@ -137,7 +139,7 @@ impl<'a> FuzzySimplicialSet<'a> {
 }
 
 /// Compute elementwise (Hadamard) product of two same‑shape CSRs.
-fn hadamard(a: &CsMat<f64>, b: &CsMat<f64>) -> CsMat<f64> {
+fn hadamard(a: &CsMatView<f32>, b: &CsMatView<f32>) -> CsMat<f32> {
   assert_eq!(a.shape(), b.shape(), "shapes must match for hadamard");
   let mut tri = TriMat::new(a.shape());
   // iterate nonzeros of `a`

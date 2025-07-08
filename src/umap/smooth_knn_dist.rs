@@ -1,8 +1,7 @@
-use derive_builder::Builder;
 use ndarray::{Array1, ArrayView2};
+use typed_builder::TypedBuilder;
 
-#[derive(Builder, Debug)]
-#[builder(setter(into))]
+#[derive(TypedBuilder, Debug)]
 pub struct SmoothKnnDist<'a> {
   distances: &'a ArrayView2<'a, f32>,
   k: usize,

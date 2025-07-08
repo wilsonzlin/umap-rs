@@ -1,60 +1,64 @@
 use dashmap::DashSet;
-use derive_builder::Builder;
-use ndarray::ArrayView2;
+use ndarray::{Array1, ArrayView2};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use sprs::{CsMat, TriMat};
+use typed_builder::TypedBuilder;
 
 use crate::{metric::Metric, umap::{find_ab_params::find_ab_params, fuzzy_simplicial_set::FuzzySimplicialSet, raise_disconnected_warning::raise_disconnected_warning}};
 
 
-
-#[derive(Debug, Default)]
-struct State {
-  // [DIVERGE] How many rows are in the input dataset.
-  // We store this to avoid needing to store the entire dataset, for cheaper serialization.
-  n: usize,
-  a: f32,
-  b: f32,
-  initial_alpha: f32,
-  disconnection_distance: f32,
-}
-
-#[derive(Builder, Debug)]
-#[builder(setter(into))]
+#[derive(TypedBuilder, Debug)]
 pub struct Umap<'a> {
-  #[builder(default = "15")]
+  #[builder(default = 15)]
   n_neighbors: usize,
-  #[builder(default = "2")]
+  #[builder(default = 2)]
   n_components: usize,
   metric: &'a dyn Metric,
   output_metric: &'a dyn Metric,
   n_epochs: Option<usize>,
-  #[builder(default = "1.0")]
+  #[builder(default = 1.0)]
   learning_rate: f32,
   init: &'a ArrayView2<'a, f32>,
-  #[builder(default = "0.1")]
+  #[builder(default = 0.1)]
   min_dist: f32,
-  #[builder(default = "1.0")]
+  #[builder(default = 1.0)]
   spread: f32,
-  #[builder(default = "1.0")]
+  #[builder(default = 1.0)]
   set_op_mix_ratio: f32,
-  #[builder(default = "1.0")]
+  #[builder(default = 1.0)]
   local_connectivity: f32,
-  #[builder(default = "1.0")]
+  #[builder(default = 1.0)]
   repulsion_strength: f32,
-  #[builder(default = "5")]
+  #[builder(default = 5)]
   negative_sample_rate: usize,
-  #[builder(default = "4.0")]
+  #[builder(default = 4.0)]
   transform_queue_size: f32,
-  a: Option<f32>,
-  b: Option<f32>,
-  #[builder(default = "42")]
+  /// Provide NaN to autoconfigure.
+  #[builder(default = f32::NAN)]
+  a: f32,
+  /// Provide NaN to autoconfigure.
+  #[builder(default = f32::NAN)]
+  b: f32,
+  #[builder(default = 42)]
   transform_seed: usize,
-  disconnection_distance: Option<f32>,
+  /// Provide NaN to autoconfigure.
+  #[builder(default = f32::NAN)]
+  disconnection_distance: f32,
   knn_dists: &'a ArrayView2<'a, f32>,
   knn_indices: &'a ArrayView2<'a, u32>,
 
-  #[builder(setter(skip))]
-  _s: State,
+  // [DIVERGE] How many rows are in the input dataset.
+  // We store this to avoid needing to store the entire dataset, for cheaper serialization.
+  #[builder(setter(skip), default=usize::MAX)]
+  n: usize,
+  #[builder(setter(skip), default=f32::NAN)]
+  initial_alpha: f32,
+  #[builder(setter(skip), default=TriMat::new((0, 0)).to_csr())]
+  graph: CsMat<f32>,
+  #[builder(setter(skip), default=Default::default())]
+  sigmas: Array1<f32>,
+  #[builder(setter(skip), default=Default::default())]
+  rhos: Array1<f32>,
 }
 
 impl<'a> Umap<'a> {
@@ -77,7 +81,7 @@ impl<'a> Umap<'a> {
         if self.negative_sample_rate < 0 {
             panic!("negative sample rate must be positive");
         }
-        if self._s.initial_alpha < 0.0 {
+        if self.initial_alpha < 0.0 {
             panic!("learning_rate must be positive");
         }
         if self.n_neighbors < 2 {
@@ -90,7 +94,9 @@ impl<'a> Umap<'a> {
         // This will be used to prune all edges of greater than a fixed value from our knn graph.
         // We have preset defaults described in DISCONNECTION_DISTANCES for our bounded measures.
         // Otherwise a user can pass in their own value.
-        self._s.disconnection_distance = self.disconnection_distance.unwrap_or_else(|| self.metric.default_disconnection_distance());
+        if self.disconnection_distance.is_nan() {
+          self.disconnection_distance = self.metric.default_disconnection_distance();
+        };
 
         if self.knn_dists.shape() != self.knn_indices.shape() {
             panic!(
@@ -100,7 +106,7 @@ impl<'a> Umap<'a> {
         if self.knn_dists.shape()[1] != self.n_neighbors {
             panic!("knn_dists has a number of neighbors not equal to n_neighbors parameter");
         }
-        if self.knn_dists.shape()[0] != self._s.n {
+        if self.knn_dists.shape()[0] != self.n {
             panic!(
                 "knn_dists has a different number of samples than the data you are fitting"
             );
@@ -108,59 +114,49 @@ impl<'a> Umap<'a> {
     }
 
     fn fit(&mut self, X: &ArrayView2<f32>) {
-        self._s.n = X.shape()[0];
+        self.n = X.shape()[0];
 
         // Handle all the optional arguments, setting default
-        if self.a.is_none() || self.b.is_none() {
+        if self.a.is_nan() || self.b.is_nan() {
             let (a, b) = find_ab_params(self.spread, self.min_dist);
-            self._s.a = a;
-            self._s.b = b;
-        } else {
-            self._s.a = self.a.unwrap();
-            self._s.b = self.b.unwrap();
+            self.a = a;
+            self.b = b;
         }
 
-        let init = self.init;
-
-        self._s.initial_alpha = self.learning_rate;
+        self.initial_alpha = self.learning_rate;
 
         self._validate_parameters();
 
         // Error check n_neighbors based on data size
-        assert!(X.shape()[0] > self.n_neighbors);
-
-        let random_state = check_random_state(self.random_state);
+        assert!(self.n > self.n_neighbors);
 
         // Disconnect any vertices farther apart than _disconnection_distance
         let knn_disconnections = DashSet::new();
-        (0..self._s.n).into_par_iter().for_each(|row_no| {
+        (0..self.n).into_par_iter().for_each(|row_no| {
           let row = self.knn_dists.row(row_no);
           for (col_no, &dist) in row.iter().enumerate() {
-            if dist >= self._s.disconnection_distance {
+            if dist >= self.disconnection_distance {
               knn_disconnections.insert((row_no, col_no));
             }
           }
         });
         let edges_removed = knn_disconnections.len();
 
-        (
-            self.graph_,
-            self._sigmas,
-            self._rhos,
-            self.graph_dists_,
-        ) = FuzzySimplicialSet::default()(
-            X,
-            self.n_neighbors,
-            random_state,
-            nn_metric,
-            self._metric_kwds,
-            self._knn_indices,
-            self._knn_dists,
-            self.angular_rp_forest,
-            self.set_op_mix_ratio,
-            self.local_connectivity,
-            True,
-        );
+        let (graph, sigmas, rhos) = FuzzySimplicialSet::builder()
+          .X(X)
+          .n_neighbors(self.n_neighbors)
+          .knn_indices(self.knn_indices)
+          .knn_dists(self.knn_dists)
+          .knn_disconnections(&knn_disconnections)
+          .local_connectivity(self.local_connectivity)
+          .set_op_mix_ratio(self.set_op_mix_ratio)
+          .apply_set_operations(true)
+          .build()
+          .exec();
+        self.graph = graph;
+        self.sigmas = sigmas;
+        self.rhos = rhos;
+
         // Report the number of vertices with degree 0 in our umap.graph_
         // This ensures that they were properly disconnected.
         let vertices_disconnected = np.sum(
@@ -188,7 +184,7 @@ impl<'a> Umap<'a> {
         // coordinates of np.nan.  These will be filtered by our plotting functions automatically.
         // They also prevent users from being deceived a distance query to one of these points.
         // Might be worth moving this into simplicial_set_embedding or _fit_embed_data
-        let disconnected_vertices = np.array(self.graph_.sum(axis=1)).flatten() == 0;
+        let disconnected_vertices = np.array(self.graph.sum(axis=1)).flatten() == 0;
         if len(disconnected_vertices) > 0 {
             self.embedding_[disconnected_vertices] = np.full(
                 self.n_components, np.nan
@@ -198,11 +194,13 @@ impl<'a> Umap<'a> {
         self
     }
 
-    fn _fit_embed_data(&self, X, n_epochs, init, random_state) {
-        """A method wrapper for simplicial_set_embedding that can be
-        replaced by subclasses. Arbitrary keyword arguments can be passed
-        through .fit() and .fit_transform().
-        """
+    /*
+      A method wrapper for simplicial_set_embedding that can be
+      replaced by subclasses. Arbitrary keyword arguments can be passed
+      through .fit() and .fit_transform().
+    */
+    fn _fit_embed_data(&self, X: &ArrayView2<f32>, n_epochs: usize, init: &ArrayView2<f32>, random_state: &RandomState) {
+
         return simplicial_set_embedding(
             self.graph_,
             self._initial_alpha,

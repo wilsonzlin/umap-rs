@@ -6,28 +6,6 @@ import umap.distances as dist
 from umap.utils import tau_rand_int
 
 
-@numba.njit()
-def clip(val):
-    """Standard clamping of a value into a fixed range (in this case -4.0 to
-    4.0)
-
-    Parameters
-    ----------
-    val: float
-        The value to be clamped.
-
-    Returns
-    -------
-    The clamped value, now fixed to be in the range -4.0 to 4.0.
-    """
-    if val > 4.0:
-        return 4.0
-    elif val < -4.0:
-        return -4.0
-    else:
-        return val
-
-
 @numba.njit(
     "f4(f4[::1],f4[::1])",
     fastmath=True,
@@ -58,4 +36,3 @@ def rdist(x, y):
         result += diff * diff
 
     return result
-
