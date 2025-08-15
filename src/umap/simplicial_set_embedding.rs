@@ -2,43 +2,40 @@ use ndarray::ArrayView2;
 use sprs::CsMatView;
 use typed_builder::TypedBuilder;
 
-use crate::metric::Metric;
+use crate::{metric::Metric, umap::make_epochs_per_sample::make_epochs_per_sample};
 
 #[derive(Debug, TypedBuilder)]
-pub struct SimplicialSetEmbedding<'a> {
-  graph: &'a CsMatView<'a, f32>,
+pub struct SimplicialSetEmbedding<'g, 'i, 'o> {
+  graph: CsMatView<'g, f32>,
   initial_alpha: f32,
   a: f32,
   b: f32,
   gamma: f32,
   negative_sample_rate: usize,
-  n_epochs: usize,
-  init: &'a ArrayView2<'a, f32>,
-  output_metric: &'a dyn Metric,
-  #[builder(default=true)]
-  euclidean_output: bool,
+  n_epochs: Option<usize>,
+  init: ArrayView2<'i, f32>,
+  output_metric: &'o dyn Metric,
 }
 
-impl<'a> SimplicialSetEmbedding<'a> {
+impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
   pub fn exec(self) {
-    let Self { graph, initial_alpha, a, b, gamma, negative_sample_rate, n_epochs, init, output_metric, euclidean_output } = self;
+    let Self { graph, initial_alpha, a, b, gamma, negative_sample_rate, n_epochs, init, output_metric } = self;
+    let euclidean_output = output_metric.is_euclidean();
 
-    graph = graph.tocoo();
+    let graph = graph.tocoo();
     graph.sum_duplicates();
-    n_vertices = graph.shape[1];
+    let n_vertices = graph.shape().1;
 
     // For smaller datasets we can use more epochs
-    if graph.shape[0] <= 10000 {
-        default_epochs = 500
+    let default_epochs = if graph.shape().0 <= 10000 {
+        500
     } else {
-        default_epochs = 200
-    }
+        200
+    };
 
-    if n_epochs is None:
-        n_epochs = default_epochs
+    let n_epochs = n_epochs.unwrap_or(default_epochs);
 
-    // If n_epoch is a list, get the maximum epoch to reach
-    n_epochs_max = max(n_epochs) if isinstance(n_epochs, list) else n_epochs
+    let n_epochs_max = n_epochs;
 
     if n_epochs_max > 10 {
         graph.data[graph.data < (graph.data.max() / float(n_epochs_max))] = 0.0
@@ -48,22 +45,18 @@ impl<'a> SimplicialSetEmbedding<'a> {
 
     graph.eliminate_zeros();
 
-    init_data = np.array(init);
-    embedding = init_data;
+    let mut embedding = init.to_owned();
 
-    epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs_max);
+    let epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs_max);
 
-    head = graph.row;
-    tail = graph.col;
-    weight = graph.data;
+    let head = graph.row;
+    let tail = graph.col;
+    let weight = graph.data;
 
-    rng_state = random_state.randint(INT32_MIN, INT32_MAX, 3).astype(np.int64);
-
-    embedding = (
+    embedding =
         10.0
         * (embedding - np.min(embedding, 0))
-        / (np.max(embedding, 0) - np.min(embedding, 0))
-    ).astype(np.float32, order="C")
+        / (np.max(embedding, 0) - np.min(embedding, 0));
 
     if euclidean_output {
         embedding = optimize_layout_euclidean(
@@ -103,6 +96,6 @@ impl<'a> SimplicialSetEmbedding<'a> {
         )
     }
 
-    return embedding
+    embedding
   }
 }
