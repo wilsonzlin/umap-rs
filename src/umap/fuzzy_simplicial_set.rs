@@ -127,12 +127,14 @@ impl<'a> FuzzySimplicialSet<'a> {
 
         let prod_matrix = hadamard(&result.view(), &transpose.view());
 
-        result =
-            set_op_mix_ratio * (result + transpose - prod_matrix)
-            + (1.0 - set_op_mix_ratio) * prod_matrix;
+        // Compute set operations: fuzzy union and intersection
+        // Union: a + b - a*b, Intersection: a*b
+        let union_part = &result + &transpose;
+        let union_result = &union_part + &prod_matrix.map(|&x| -x);
+        let scaled_union = union_result.map(|&x| set_op_mix_ratio * x);
+        let scaled_prod = prod_matrix.map(|&x| (1.0 - set_op_mix_ratio) * x);
+        result = &scaled_union + &scaled_prod;
     }
-
-    result.eliminate_zeros();
 
     (result, sigmas, rhos)
   }

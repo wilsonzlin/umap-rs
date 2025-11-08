@@ -1,8 +1,9 @@
-use ndarray::ArrayView2;
+use ndarray::{Array2, ArrayView2, Axis};
 use sprs::CsMatView;
 use typed_builder::TypedBuilder;
 
-use crate::{metric::Metric, umap::make_epochs_per_sample::make_epochs_per_sample};
+use crate::metric::Metric;
+use crate::umap::make_epochs_per_sample::make_epochs_per_sample;
 
 #[derive(Debug, TypedBuilder)]
 pub struct SimplicialSetEmbedding<'g, 'i, 'o> {
@@ -18,16 +19,15 @@ pub struct SimplicialSetEmbedding<'g, 'i, 'o> {
 }
 
 impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
-  pub fn exec(self) {
+  pub fn exec(self) -> Array2<f32> {
     let Self { graph, initial_alpha, a, b, gamma, negative_sample_rate, n_epochs, init, output_metric } = self;
-    let euclidean_output = output_metric.is_euclidean();
+    let _euclidean_output = output_metric.is_euclidean();
 
-    let graph = graph.tocoo();
-    graph.sum_duplicates();
-    let n_vertices = graph.shape().1;
+    let graph_csr = graph.to_csr();
+    let n_vertices = graph.cols();
 
     // For smaller datasets we can use more epochs
-    let default_epochs = if graph.shape().0 <= 10000 {
+    let default_epochs = if graph.rows() <= 10000 {
         500
     } else {
         200
@@ -37,64 +37,49 @@ impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
 
     let n_epochs_max = n_epochs;
 
-    if n_epochs_max > 10 {
-        graph.data[graph.data < (graph.data.max() / float(n_epochs_max))] = 0.0
-    } else {
-        graph.data[graph.data < (graph.data.max() / float(default_epochs))] = 0.0
-    }
+    // Find max value for filtering
+    let graph_max = graph_csr.data().iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-    graph.eliminate_zeros();
+    let threshold = if n_epochs_max > 10 {
+        graph_max / (n_epochs_max as f32)
+    } else {
+        graph_max / (default_epochs as f32)
+    };
+
+    // Build filtered edge list
+    let mut filtered_data = Vec::new();
+
+    for (row_idx, row) in graph_csr.outer_iterator().enumerate() {
+        for (&col_idx, &value) in row.indices().iter().zip(row.data().iter()) {
+            if value > threshold {
+                filtered_data.push(value as f64);
+            }
+        }
+    }
 
     let mut embedding = init.to_owned();
 
-    let epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs_max);
+    let epochs_per_sample = make_epochs_per_sample(
+        &ndarray::ArrayView1::from(&filtered_data),
+        n_epochs_max
+    );
 
-    let head = graph.row;
-    let tail = graph.col;
-    let weight = graph.data;
+    // Normalize embedding to [0, 10] range per dimension
+    let min_vals = embedding.fold_axis(Axis(0), f32::INFINITY, |&a, &b| a.min(b));
+    let max_vals = embedding.fold_axis(Axis(0), f32::NEG_INFINITY, |&a, &b| a.max(b));
 
-    embedding =
-        10.0
-        * (embedding - np.min(embedding, 0))
-        / (np.max(embedding, 0) - np.min(embedding, 0));
-
-    if euclidean_output {
-        embedding = optimize_layout_euclidean(
-            embedding,
-            embedding,
-            head,
-            tail,
-            n_epochs,
-            n_vertices,
-            epochs_per_sample,
-            a,
-            b,
-            rng_state,
-            gamma,
-            initial_alpha,
-            negative_sample_rate,
-            parallel=parallel,
-            move_other=True,
-        )
-    } else {
-        embedding = optimize_layout_generic(
-            embedding,
-            embedding,
-            head,
-            tail,
-            n_epochs,
-            n_vertices,
-            epochs_per_sample,
-            a,
-            b,
-            rng_state,
-            gamma,
-            initial_alpha,
-            negative_sample_rate,
-            output_metric,
-            move_other=True,
-        )
+    for i in 0..embedding.shape()[0] {
+        for j in 0..embedding.shape()[1] {
+            let range = max_vals[j] - min_vals[j];
+            if range > 0.0 {
+                embedding[[i, j]] = 10.0 * (embedding[[i, j]] - min_vals[j]) / range;
+            }
+        }
     }
+
+    // TODO: Call optimize_layout_euclidean or optimize_layout_generic here
+    // For now, just return the initialized embedding
+    // This will be completed when we port the euclidean optimization
 
     embedding
   }

@@ -18,8 +18,14 @@ use ndarray::{Array1, ArrayView1};
   An array of number of epochs per sample, one for each 1-simplex.
 */
 pub fn make_epochs_per_sample(weights: &ArrayView1<f64>, n_epochs: usize) -> Array1<f64> {
-  let result = -1.0 * Array1::<f64>::ones(weights.shape()[0]);
-  let n_samples = n_epochs * (weights / weights.max());
-  result[n_samples > 0] = n_epochs as f64 / n_samples[n_samples > 0];
+  let mut result = Array1::<f64>::from_elem(weights.shape()[0], -1.0);
+  let weights_max = weights.fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+  let n_samples: Array1<f64> = weights.mapv(|w| n_epochs as f64 * (w / weights_max));
+
+  for i in 0..result.len() {
+    if n_samples[i] > 0.0 {
+      result[i] = n_epochs as f64 / n_samples[i];
+    }
+  }
   result
 }

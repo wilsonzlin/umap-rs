@@ -1,15 +1,17 @@
 use ndarray::{ArrayView1, ArrayViewMut1, ArrayViewMut2};
-use rand::{rng, Rng};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use typed_builder::TypedBuilder;
 
-use crate::{metric::Metric, utils::clip::clip};
+use crate::metric::Metric;
+use crate::utils::clip::clip;
 
 #[derive(TypedBuilder)]
 struct OptimizeLayoutGenericSingleEpoch<'a> {
   epochs_per_sample: &'a ArrayView1<'a, f64>,
   epoch_of_next_sample: &'a mut ArrayViewMut1<'a, f64>,
-  head: &'a ArrayView1<'a, u32>,
-  tail: &'a ArrayView1<'a, u32>,
+  head: &'a ArrayView1<'a, usize>,
+  tail: &'a ArrayView1<'a, usize>,
   head_embedding: &'a mut ArrayViewMut2<'a, f32>,
   tail_embedding: &'a mut ArrayViewMut2<'a, f32>,
   output_metric: &'a dyn Metric,
@@ -18,11 +20,12 @@ struct OptimizeLayoutGenericSingleEpoch<'a> {
   move_other: bool,
   n: usize,
   epoch_of_next_negative_sample: &'a mut ArrayViewMut1<'a, f64>,
-  epochs_per_negative_sample: &'a mut ArrayViewMut1<'a, f64>,
+  epochs_per_negative_sample: &'a ArrayView1<'a, f64>,
   n_vertices: usize,
   a: f32,
   b: f32,
   gamma: f32,
+  rng: &'a mut StdRng,
 }
 
 impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
@@ -45,12 +48,13 @@ impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
       a,
       b,
       gamma,
+      rng,
     } = self;
 
-    for i in 0..epochs_per_sample.shape()[0] {
+    for i in 0..epochs_per_sample.len() {
         if epoch_of_next_sample[i] <= n as f64 {
-            let j = head[i] as usize;
-            let k = tail[i] as usize;
+            let j = head[i];
+            let k = tail[i];
 
             let current = head_embedding.row(j);
             let other = tail_embedding.row(k);
@@ -84,8 +88,8 @@ impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
                 (n as f64 - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]
             ) as usize;
 
-            for p in 0..n_neg_samples {
-                let k = rng().random_range(0..n_vertices);
+            for _p in 0..n_neg_samples {
+                let k = rng.random_range(0..n_vertices);
 
                 let current = head_embedding.row(j);
                 let other = tail_embedding.row(k);
@@ -186,8 +190,8 @@ impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
 pub struct OptimizeLayoutGeneric<'a> {
   head_embedding: &'a mut ArrayViewMut2<'a, f32>,
   tail_embedding: &'a mut ArrayViewMut2<'a, f32>,
-  head: &'a ArrayView1<'a, u32>,
-  tail: &'a ArrayView1<'a, u32>,
+  head: &'a ArrayView1<'a, usize>,
+  tail: &'a ArrayView1<'a, usize>,
   n_epochs: usize,
   n_vertices: usize,
   epochs_per_sample: &'a ArrayView1<'a, f64>,
@@ -200,12 +204,14 @@ pub struct OptimizeLayoutGeneric<'a> {
   #[builder(default = 5.0)]
   negative_sample_rate: f64,
   output_metric: &'a dyn Metric,
+  #[builder(default = 42)]
+  random_seed: u64,
   #[builder(default = false)]
   move_other: bool,
 }
 
 impl<'a> OptimizeLayoutGeneric<'a> {
-  pub fn exec(self) {
+  pub fn exec(self) -> &'a mut ArrayViewMut2<'a, f32> {
     let Self {
       head_embedding,
       tail_embedding,
@@ -220,6 +226,7 @@ impl<'a> OptimizeLayoutGeneric<'a> {
       initial_alpha,
       negative_sample_rate,
       output_metric,
+      random_seed,
       move_other,
     } = self;
 
@@ -227,10 +234,12 @@ impl<'a> OptimizeLayoutGeneric<'a> {
     let mut alpha = initial_alpha;
 
     let epochs_per_negative_sample = epochs_per_sample / negative_sample_rate;
-    let mut epoch_of_next_negative_sample = epochs_per_negative_sample.clone();
+    let mut epoch_of_next_negative_sample = epochs_per_negative_sample.to_owned();
     let mut epoch_of_next_sample = epochs_per_sample.to_owned();
 
-    for n in tqdm(0..n_epochs) {
+    let mut rng = StdRng::seed_from_u64(random_seed);
+
+    for n in 0..n_epochs {
       OptimizeLayoutGenericSingleEpoch::builder()
         .epochs_per_sample(epochs_per_sample)
         .epoch_of_next_sample(&mut epoch_of_next_sample.view_mut())
@@ -244,11 +253,12 @@ impl<'a> OptimizeLayoutGeneric<'a> {
         .move_other(move_other)
         .n(n)
         .epoch_of_next_negative_sample(&mut epoch_of_next_negative_sample.view_mut())
-        .epochs_per_negative_sample(&mut epochs_per_negative_sample.view_mut())
+        .epochs_per_negative_sample(&epochs_per_negative_sample.view())
         .n_vertices(n_vertices)
         .a(a)
         .b(b)
         .gamma(gamma)
+        .rng(&mut rng)
         .build()
         .exec();
       alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));

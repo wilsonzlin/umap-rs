@@ -1,10 +1,14 @@
 use dashmap::DashSet;
-use ndarray::{Array1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sprs::{CsMat, TriMat};
 use typed_builder::TypedBuilder;
 
-use crate::{metric::Metric, umap::{find_ab_params::find_ab_params, fuzzy_simplicial_set::FuzzySimplicialSet, raise_disconnected_warning::raise_disconnected_warning, simplicial_set_embedding::SimplicialSetEmbedding}};
+use crate::metric::Metric;
+use crate::umap::find_ab_params::find_ab_params;
+use crate::umap::fuzzy_simplicial_set::FuzzySimplicialSet;
+use crate::umap::raise_disconnected_warning::raise_disconnected_warning;
+use crate::umap::simplicial_set_embedding::SimplicialSetEmbedding;
 
 
 #[derive(TypedBuilder, Debug)]
@@ -113,7 +117,7 @@ impl<'a> Umap<'a> {
         }
     }
 
-    fn fit(&mut self, X: ArrayView2<f32>) {
+    pub fn fit(&mut self, X: ArrayView2<f32>) -> Array2<f32> {
         self.n = X.shape()[0];
 
         // Handle all the optional arguments, setting default
@@ -143,10 +147,10 @@ impl<'a> Umap<'a> {
         let edges_removed = knn_disconnections.len();
 
         let (graph, sigmas, rhos) = FuzzySimplicialSet::builder()
-          .X(X)
+          .X(&X)
           .n_neighbors(self.n_neighbors)
-          .knn_indices(self.knn_indices)
-          .knn_dists(self.knn_dists)
+          .knn_indices(&self.knn_indices)
+          .knn_dists(&self.knn_dists)
           .knn_disconnections(&knn_disconnections)
           .local_connectivity(self.local_connectivity)
           .set_op_mix_ratio(self.set_op_mix_ratio)
@@ -168,23 +172,25 @@ impl<'a> Umap<'a> {
             0.1,
         );
 
-        self.embedding_ = self._fit_embed_data(
+        let mut embedding = self._fit_embed_data(
             self.n_epochs,
             self.init,
         );
 
         // Assign any points that are fully disconnected from our manifold(s) to have embedding
-        // coordinates of np.nan.  These will be filtered by our plotting functions automatically.
+        // coordinates of NaN.  These will be filtered by our plotting functions automatically.
         // They also prevent users from being deceived a distance query to one of these points.
         // Might be worth moving this into simplicial_set_embedding or _fit_embed_data
-        let disconnected_vertices = np.array(self.graph.sum(axis=1)).flatten() == 0;
-        if len(disconnected_vertices) > 0 {
-            self.embedding_[disconnected_vertices] = np.full(
-                self.n_components, np.nan
-            );
+        for (i, row) in self.graph.outer_iterator().enumerate() {
+            let row_sum: f32 = row.data().iter().sum();
+            if row_sum == 0.0 {
+                for j in 0..self.n_components {
+                    embedding[[i, j]] = f32::NAN;
+                }
+            }
         }
 
-        self
+        embedding
     }
 
     /*
@@ -192,7 +198,7 @@ impl<'a> Umap<'a> {
       replaced by subclasses. Arbitrary keyword arguments can be passed
       through .fit() and .fit_transform().
     */
-    fn _fit_embed_data(&self, n_epochs: Option<usize>, init: ArrayView2<f32>) {
+    fn _fit_embed_data(&self, n_epochs: Option<usize>, init: ArrayView2<f32>) -> Array2<f32> {
       SimplicialSetEmbedding::builder()
         .graph(self.graph.view())
         .initial_alpha(self.initial_alpha)
@@ -207,12 +213,13 @@ impl<'a> Umap<'a> {
         .exec()
     }
 
-    fn fit_transform(self, X) {
-        self.fit(X, **kwargs)
-        return self.embedding_
+    pub fn fit_transform(&mut self, X: ArrayView2<f32>) -> Array2<f32> {
+        self.fit(X)
     }
 
-    fn transform(self, X) {
+    // TODO: Complete transform implementation
+    /*
+    pub fn transform(&self, X: ArrayView2<f32>) -> Array2<f32> {
         // If we fit just a single instance then error
         if self._raw_data.shape[0] == 1 {
             panic!(
@@ -326,4 +333,5 @@ impl<'a> Umap<'a> {
 
         embedding
     }
+    */
 }
