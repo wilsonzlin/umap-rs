@@ -6,7 +6,10 @@ use ndarray::{Array1, ArrayView2};
 use sprs::{CsMat, CsMatView, TriMat};
 use typed_builder::TypedBuilder;
 
-use crate::umap::{compute_membership_strengths::{ComputeMembershipStrengths, ComputeMembershipStrengthsBuilder}, smooth_knn_dist::{SmoothKnnDist, SmoothKnnDistBuilder}};
+use crate::umap::{
+    compute_membership_strengths::ComputeMembershipStrengths,
+    smooth_knn_dist::SmoothKnnDist,
+};
 
 /*
   Given a set of data X, a neighborhood size, and a measure of distance
@@ -68,12 +71,12 @@ use crate::umap::{compute_membership_strengths::{ComputeMembershipStrengths, Com
       1-simplex between the ith and jth sample points.
 */
 #[derive(TypedBuilder, Debug)]
-pub struct FuzzySimplicialSet<'a> {
-  X: &'a ArrayView2<'a, f32>,
+pub struct FuzzySimplicialSet<'a, 'd> {
+  n_samples: usize,
   n_neighbors: usize,
-  knn_indices: &'a ArrayView2<'a, u32>,
-  knn_dists: &'a ArrayView2<'a, f32>,
-  knn_disconnections: &'a DashSet<(usize, usize)>,
+  knn_indices: ArrayView2<'a, u32>,
+  knn_dists: ArrayView2<'a, f32>,
+  knn_disconnections: &'d DashSet<(usize, usize)>,
   #[builder(default = 1.0)]
   set_op_mix_ratio: f32,
   #[builder(default = 1.0)]
@@ -82,18 +85,17 @@ pub struct FuzzySimplicialSet<'a> {
   apply_set_operations: bool,
 }
 
-impl<'a> FuzzySimplicialSet<'a> {
+impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
   pub fn exec(self) -> (CsMat<f32>, Array1<f32>, Array1<f32>) {
-    let Self {
-      X,
-      n_neighbors,
-      knn_indices,
-      knn_dists,
-      knn_disconnections,
-      set_op_mix_ratio,
-      local_connectivity,
-      apply_set_operations,
-    } = self;
+    // Extract the fields we need
+    let knn_dists = self.knn_dists;
+    let knn_indices = self.knn_indices;
+    let knn_disconnections = self.knn_disconnections;
+    let n_neighbors = self.n_neighbors;
+    let n_samples = self.n_samples;
+    let local_connectivity = self.local_connectivity;
+    let set_op_mix_ratio = self.set_op_mix_ratio;
+    let apply_set_operations = self.apply_set_operations;
 
     let (sigmas, rhos) = SmoothKnnDist::builder()
       .distances(knn_dists)
@@ -112,27 +114,39 @@ impl<'a> FuzzySimplicialSet<'a> {
       .exec();
 
     let mut result = {
-      let n = X.shape()[0];
-      let mat = TriMat::new((n, n));
+      let mut mat = TriMat::new((n_samples, n_samples));
       for (v, r, c) in izip!(vals, rows, cols) {
         if v != 0.0 {
           mat.add_triplet(r as usize, c as usize, v);
         }
       };
-      mat.to_csc()
+      mat.to_csr::<usize>()
     };
 
     if apply_set_operations {
         let transpose = result.transpose_view().to_csr();
-
         let prod_matrix = hadamard(&result.view(), &transpose.view());
 
-        result =
-            set_op_mix_ratio * (result + transpose - prod_matrix)
-            + (1.0 - set_op_mix_ratio) * prod_matrix;
-    }
+        // Compute: set_op_mix_ratio * (result + transpose - prod_matrix) + (1 - set_op_mix_ratio) * prod_matrix
+        // This simplifies to: set_op_mix_ratio * (result + transpose) + (1 - 2*set_op_mix_ratio) * prod_matrix
+        let mut tri = TriMat::new(result.shape());
 
-    result.eliminate_zeros();
+        // Add set_op_mix_ratio * (result + transpose)
+        for (val, (row, col)) in result.iter() {
+            tri.add_triplet(row, col, set_op_mix_ratio * val);
+        }
+        for (val, (row, col)) in transpose.iter() {
+            tri.add_triplet(row, col, set_op_mix_ratio * val);
+        }
+
+        // Add (1 - 2*set_op_mix_ratio) * prod_matrix
+        let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio + set_op_mix_ratio;
+        for (val, (row, col)) in prod_matrix.iter() {
+            tri.add_triplet(row, col, prod_coeff * val);
+        }
+
+        result = tri.to_csr::<usize>();
+    }
 
     (result, sigmas, rhos)
   }
@@ -153,5 +167,5 @@ fn hadamard(a: &CsMatView<f32>, b: &CsMatView<f32>) -> CsMat<f32> {
           }
       }
   }
-  tri.to_csr()
+  tri.to_csr::<usize>()
 }

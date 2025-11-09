@@ -1,52 +1,33 @@
-use ndarray::{ArrayView1, ArrayViewMut1, ArrayViewMut2};
-use rand::{rng, Rng};
+use ndarray::{Array1, ArrayView1, ArrayViewMut2};
+use rand::Rng;
 use typed_builder::TypedBuilder;
 
 use crate::{metric::Metric, utils::clip::clip};
 
-#[derive(TypedBuilder)]
-struct OptimizeLayoutGenericSingleEpoch<'a> {
-  epochs_per_sample: &'a ArrayView1<'a, f64>,
-  epoch_of_next_sample: &'a mut ArrayViewMut1<'a, f64>,
-  head: &'a ArrayView1<'a, u32>,
-  tail: &'a ArrayView1<'a, u32>,
-  head_embedding: &'a mut ArrayViewMut2<'a, f32>,
-  tail_embedding: &'a mut ArrayViewMut2<'a, f32>,
-  output_metric: &'a dyn Metric,
-  dim: usize,
-  alpha: f32,
-  move_other: bool,
-  n: usize,
-  epoch_of_next_negative_sample: &'a mut ArrayViewMut1<'a, f64>,
-  epochs_per_negative_sample: &'a mut ArrayViewMut1<'a, f64>,
-  n_vertices: usize,
-  a: f32,
-  b: f32,
-  gamma: f32,
-}
-
-impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
-  pub fn exec(self) {
-    let Self {
-      epochs_per_sample,
-      epoch_of_next_sample,
-      head,
-      tail,
-      head_embedding,
-      tail_embedding,
-      output_metric,
-      dim,
-      alpha,
-      move_other,
-      n,
-      epoch_of_next_negative_sample,
-      epochs_per_negative_sample,
-      n_vertices,
-      a,
-      b,
-      gamma,
-    } = self;
-
+/// Performs a single epoch of generic (metric-agnostic) SGD optimization.
+///
+/// This is extracted as a standalone function to avoid lifetime complexities
+/// while maintaining clean code structure.
+#[allow(clippy::too_many_arguments)]
+fn optimize_layout_generic_single_epoch(
+    head_embedding: &mut ArrayViewMut2<f32>,
+    tail_embedding: &mut ArrayViewMut2<f32>,
+    head: &ArrayView1<u32>,
+    tail: &ArrayView1<u32>,
+    epochs_per_sample: &ArrayView1<f64>,
+    epoch_of_next_sample: &mut Array1<f64>,
+    epoch_of_next_negative_sample: &mut Array1<f64>,
+    epochs_per_negative_sample: &Array1<f64>,
+    output_metric: &dyn Metric,
+    dim: usize,
+    alpha: f32,
+    move_other: bool,
+    n: usize,
+    n_vertices: usize,
+    a: f32,
+    b: f32,
+    gamma: f32,
+) {
     for i in 0..epochs_per_sample.shape()[0] {
         if epoch_of_next_sample[i] <= n as f64 {
             let j = head[i] as usize;
@@ -84,8 +65,9 @@ impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
                 (n as f64 - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]
             ) as usize;
 
-            for p in 0..n_neg_samples {
-                let k = rng().random_range(0..n_vertices);
+            let mut rng = rand::rng();
+            for _p in 0..n_neg_samples {
+                let k = rng.random_range(0..n_vertices);
 
                 let current = head_embedding.row(j);
                 let other = tail_embedding.row(k);
@@ -114,9 +96,8 @@ impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
 
             epoch_of_next_negative_sample[i] +=
                 n_neg_samples as f64 * epochs_per_negative_sample[i];
-        };
+        }
     }
-  }
 }
 
 /*
@@ -226,34 +207,35 @@ impl<'a> OptimizeLayoutGeneric<'a> {
     let dim = head_embedding.shape()[1];
     let mut alpha = initial_alpha;
 
-    let epochs_per_negative_sample = epochs_per_sample / negative_sample_rate;
+    // Calculate epochs per negative sample
+    let mut epochs_per_negative_sample = Array1::<f64>::zeros(epochs_per_sample.len());
+    for i in 0..epochs_per_sample.len() {
+      epochs_per_negative_sample[i] = epochs_per_sample[i] / negative_sample_rate;
+    }
     let mut epoch_of_next_negative_sample = epochs_per_negative_sample.clone();
     let mut epoch_of_next_sample = epochs_per_sample.to_owned();
 
-    for n in tqdm(0..n_epochs) {
-      OptimizeLayoutGenericSingleEpoch::builder()
-        .epochs_per_sample(epochs_per_sample)
-        .epoch_of_next_sample(&mut epoch_of_next_sample.view_mut())
-        .head(head)
-        .tail(tail)
-        .head_embedding(head_embedding)
-        .tail_embedding(tail_embedding)
-        .output_metric(output_metric)
-        .dim(dim)
-        .alpha(alpha)
-        .move_other(move_other)
-        .n(n)
-        .epoch_of_next_negative_sample(&mut epoch_of_next_negative_sample.view_mut())
-        .epochs_per_negative_sample(&mut epochs_per_negative_sample.view_mut())
-        .n_vertices(n_vertices)
-        .a(a)
-        .b(b)
-        .gamma(gamma)
-        .build()
-        .exec();
+    for n in 0..n_epochs {
+      optimize_layout_generic_single_epoch(
+        head_embedding,
+        tail_embedding,
+        head,
+        tail,
+        epochs_per_sample,
+        &mut epoch_of_next_sample,
+        &mut epoch_of_next_negative_sample,
+        &epochs_per_negative_sample,
+        output_metric,
+        dim,
+        alpha,
+        move_other,
+        n,
+        n_vertices,
+        a,
+        b,
+        gamma,
+      );
       alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));
     }
-
-    head_embedding
   }
 }
