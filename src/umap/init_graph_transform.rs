@@ -30,22 +30,26 @@ use sprs::CsMatView;
 pub fn init_graph_transform(
   graph: &CsMatView<f32>,
   embedding: &ArrayView2<f32>,
-) {
-  let result = Array2::<f32>::zeros((graph.shape[0], embedding.shape[1]));
+) -> Array2<f32> {
+  let mut result = Array2::<f32>::zeros((graph.shape().0, embedding.shape()[1]));
 
-  for row_index in 0..graph.shape[0] {
+  for row_index in 0..graph.shape().0 {
     let graph_row = graph.outer_view(row_index).unwrap();
     if graph_row.nnz() == 0 {
-      result.row_mut(row_index) = f32::NAN;
+      result.row_mut(row_index).fill(f32::NAN);
       continue;
     }
-    row_sum = graph_row.sum();
-    for (graph_value, col_index) in zip(graph_row.data(), graph_row.indices()) {
-      if graph_value == 1 {
-        result.row_mut(row_index) = embedding.row(col_index);
+    let row_sum = graph_row.data().iter().sum::<f32>();
+    for (&graph_value, &col_index) in zip(graph_row.data(), graph_row.indices()) {
+      if graph_value == 1.0 {
+        result.row_mut(row_index).assign(&embedding.row(col_index));
         break
       };
-      result[row_index] += graph_value / row_sum * embedding[col_index];
+      let mut row = result.row_mut(row_index);
+      let emb_row = embedding.row(col_index);
+      for i in 0..row.len() {
+        row[i] += graph_value / row_sum * emb_row[i];
+      }
     }
   }
 

@@ -6,7 +6,10 @@ use ndarray::{Array1, ArrayView2};
 use sprs::{CsMat, CsMatView, TriMat};
 use typed_builder::TypedBuilder;
 
-use crate::umap::{compute_membership_strengths::{ComputeMembershipStrengths, ComputeMembershipStrengthsBuilder}, smooth_knn_dist::{SmoothKnnDist, SmoothKnnDistBuilder}};
+use crate::umap::{
+    compute_membership_strengths::ComputeMembershipStrengths,
+    smooth_knn_dist::SmoothKnnDist,
+};
 
 /*
   Given a set of data X, a neighborhood size, and a measure of distance
@@ -113,26 +116,39 @@ impl<'a> FuzzySimplicialSet<'a> {
 
     let mut result = {
       let n = X.shape()[0];
-      let mat = TriMat::new((n, n));
+      let mut mat = TriMat::new((n, n));
       for (v, r, c) in izip!(vals, rows, cols) {
         if v != 0.0 {
           mat.add_triplet(r as usize, c as usize, v);
         }
       };
-      mat.to_csc()
+      mat.to_csr()
     };
 
     if apply_set_operations {
         let transpose = result.transpose_view().to_csr();
-
         let prod_matrix = hadamard(&result.view(), &transpose.view());
 
-        result =
-            set_op_mix_ratio * (result + transpose - prod_matrix)
-            + (1.0 - set_op_mix_ratio) * prod_matrix;
-    }
+        // Compute: set_op_mix_ratio * (result + transpose - prod_matrix) + (1 - set_op_mix_ratio) * prod_matrix
+        // This simplifies to: set_op_mix_ratio * (result + transpose) + (1 - 2*set_op_mix_ratio) * prod_matrix
+        let mut tri = TriMat::new(result.shape());
 
-    result.eliminate_zeros();
+        // Add set_op_mix_ratio * (result + transpose)
+        for (val, (row, col)) in result.iter() {
+            tri.add_triplet(row, col, set_op_mix_ratio * val);
+        }
+        for (val, (row, col)) in transpose.iter() {
+            tri.add_triplet(row, col, set_op_mix_ratio * val);
+        }
+
+        // Add (1 - 2*set_op_mix_ratio) * prod_matrix
+        let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio + set_op_mix_ratio;
+        for (val, (row, col)) in prod_matrix.iter() {
+            tri.add_triplet(row, col, prod_coeff * val);
+        }
+
+        result = tri.to_csr();
+    }
 
     (result, sigmas, rhos)
   }

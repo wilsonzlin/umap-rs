@@ -1,6 +1,8 @@
 use ndarray::{Array1, ArrayView2};
 use typed_builder::TypedBuilder;
 
+use super::constants::{SMOOTH_K_TOLERANCE, MIN_K_DIST_SCALE};
+
 #[derive(TypedBuilder, Debug)]
 pub struct SmoothKnnDist<'a> {
   distances: &'a ArrayView2<'a, f32>,
@@ -63,22 +65,25 @@ impl<'a> SmoothKnnDist<'a> {
     } = self;
 
     let target = (k as f32).log2() * bandwidth;
-    let rho = Array1::<f32>::zeros(distances.shape[0]);
-    let result = Array1::<f32>::zeros(distances.shape[0]);
+    let mut rho = Array1::<f32>::zeros(distances.shape()[0]);
+    let mut result = Array1::<f32>::zeros(distances.shape()[0]);
 
     let mean_distances = distances.mean().unwrap();
 
-    for i in 0..distances.shape[0] {
+    for i in 0..distances.shape()[0] {
         let mut lo = 0.0;
         let mut hi = f32::INFINITY;
         let mut mid = 1.0;
 
-        // TODO: This is very inefficient, but will do for now. FIXME
         let ith_distances = distances.row(i);
-        let non_zero_dists: Array1<f32> = ith_distances.filter(|a| *a > 0.0).collect();
-        if non_zero_dists.shape[0] >= local_connectivity {
-            let index = local_connectivity as usize;
-            let interpolation = local_connectivity - index;
+        let non_zero_dists: Vec<f32> = ith_distances.iter()
+            .filter(|&&d| d > 0.0)
+            .copied()
+            .collect();
+
+        if non_zero_dists.len() >= local_connectivity as usize {
+            let index = local_connectivity.floor() as usize;
+            let interpolation = local_connectivity - local_connectivity.floor();
             if index > 0 {
                 rho[i] = non_zero_dists[index - 1];
                 if interpolation > SMOOTH_K_TOLERANCE {
@@ -89,16 +94,16 @@ impl<'a> SmoothKnnDist<'a> {
             } else {
                 rho[i] = interpolation * non_zero_dists[0];
             }
-        } else if non_zero_dists.shape[0] > 0 {
-            rho[i] = np.max(non_zero_dists);
+        } else if !non_zero_dists.is_empty() {
+            rho[i] = *non_zero_dists.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
         }
 
-        for n in 0..n_iter {
+        for _n in 0..n_iter {
             let mut psum = 0.0;
-            for j in 1..distances.shape[1] {
-                d = distances[(i, j)] - rho[i];
-                if d > 0 {
-                    psum += np.exp(-(d / mid));
+            for j in 1..distances.shape()[1] {
+                let d = distances[(i, j)] - rho[i];
+                if d > 0.0 {
+                    psum += f32::exp(-(d / mid));
                 } else {
                     psum += 1.0;
                 }
@@ -114,7 +119,7 @@ impl<'a> SmoothKnnDist<'a> {
             } else {
                 lo = mid;
                 if hi == f32::INFINITY {
-                    mid *= 2
+                    mid *= 2.0
                 } else {
                     mid = (lo + hi) / 2.0;
                 }
@@ -123,9 +128,8 @@ impl<'a> SmoothKnnDist<'a> {
 
         result[i] = mid;
 
-        // TODO: This is very inefficient, but will do for now. FIXME
         if rho[i] > 0.0 {
-          mean_ith_distances = ith_distances.mean().unwrap();
+          let mean_ith_distances = ith_distances.mean().unwrap();
           if result[i] < MIN_K_DIST_SCALE * mean_ith_distances {
             result[i] = MIN_K_DIST_SCALE * mean_ith_distances;
           }
