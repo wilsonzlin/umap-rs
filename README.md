@@ -1,14 +1,14 @@
 # umap-rs
 
-Fast, parallel Rust implementation of the core UMAP algorithm. Stripped-down port focused on performance.
+Fast, parallel Rust implementation of the core UMAP algorithm. Clean, modern Rust implementation focused on performance and correctness.
 
 ## What this is
 
-- Core UMAP dimensionality reduction algorithm (~1300 lines)
+- Core UMAP dimensionality reduction algorithm (~1800 lines)
 - Parallel SGD optimization (4-8x speedup via Rayon)
-- Euclidean distance + generic metric trait
+- Euclidean distance + extensible metric trait
 - Dense arrays only (no sparse matrix support)
-- Fit only (no transform for new points)
+- Fit only (transform for new points not yet implemented)
 
 ## What this is NOT
 
@@ -21,37 +21,151 @@ See [DIVERGENCES.md](DIVERGENCES.md) for detailed comparison to Python umap-lear
 ## Usage
 
 ```rust
+use umap::{Umap, UmapConfig};
 use ndarray::Array2;
-use umap::Umap;
+
+// Configure UMAP parameters
+let config = UmapConfig {
+    n_components: 2,
+    graph: GraphParams {
+        n_neighbors: 15,
+        ..Default::default()
+    },
+    ..Default::default()
+};
+
+// Create UMAP instance
+let umap = Umap::new(config);
 
 // Precompute KNN (use your favorite ANN library)
 let knn_indices: Array2<u32> = /* shape (n_samples, n_neighbors) */;
 let knn_dists: Array2<f32> = /* shape (n_samples, n_neighbors) */;
 
-// Optional: precompute initialization (PCA, spectral, etc.)
+// Precompute initialization (PCA, spectral, random, etc.)
 let init: Array2<f32> = /* shape (n_samples, n_components) */;
 
-let mut umap = UmapBuilder::default()
-    .n_neighbors(15)
-    .n_components(2)
-    .init(init.view())
-    .knn_indices(knn_indices.view())
-    .knn_dists(knn_dists.view())
-    .metric(&EuclideanMetric)
-    .output_metric(&EuclideanMetric)
-    .build();
+// Fit UMAP to data
+let model = umap.fit(
+    data.view(),
+    knn_indices.view(),
+    knn_dists.view(),
+    init.view(),
+);
 
-let embedding = umap.fit(X.view());  // Returns Array2<f32>
+// Get the embedding
+let embedding = model.embedding();  // Returns ArrayView2<f32>
+
+// Or take ownership of the embedding
+let embedding = model.into_embedding();  // Returns Array2<f32>
 ```
 
-## Key parameters
+## Configuration
 
-- `n_neighbors` (default 15): Smaller = local structure, larger = global structure
-- `n_components` (default 2): Output dimensionality
-- `min_dist` (default 0.1): Minimum distance between points in embedding
-- `init`: Custom initialization (you provide the array)
+UMAP parameters are grouped logically:
 
-See [UMAP.md](UMAP.md) for algorithm explanation.
+### Basic
+
+```rust
+use umap::UmapConfig;
+
+let config = UmapConfig {
+    n_components: 2,  // Output dimensions
+    ..Default::default()
+};
+```
+
+### Manifold parameters
+
+```rust
+use umap::config::ManifoldParams;
+
+let manifold = ManifoldParams {
+    min_dist: 0.1,   // Minimum distance in embedding
+    spread: 1.0,     // Scale of embedding
+    a: None,         // Auto-computed from min_dist/spread
+    b: None,         // Auto-computed from min_dist/spread
+};
+```
+
+### Graph construction
+
+```rust
+use umap::config::GraphParams;
+
+let graph = GraphParams {
+    n_neighbors: 15,              // Number of nearest neighbors
+    local_connectivity: 1.0,      // Local neighborhood connectivity
+    set_op_mix_ratio: 1.0,        // Fuzzy union (1.0) vs intersection (0.0)
+    disconnection_distance: None, // Auto-computed from metric
+};
+```
+
+### Optimization
+
+```rust
+use umap::config::OptimizationParams;
+
+let optimization = OptimizationParams {
+    n_epochs: None,           // Auto-determined from dataset size
+    learning_rate: 1.0,       // SGD learning rate
+    negative_sample_rate: 5,  // Negative samples per positive
+    repulsion_strength: 1.0,  // Weight for negative samples
+};
+```
+
+### Complete example
+
+```rust
+let config = UmapConfig {
+    n_components: 3,
+    manifold: ManifoldParams {
+        min_dist: 0.05,
+        ..Default::default()
+    },
+    graph: GraphParams {
+        n_neighbors: 30,
+        ..Default::default()
+    },
+    optimization: OptimizationParams {
+        n_epochs: Some(500),
+        ..Default::default()
+    },
+};
+```
+
+## Custom distance metrics
+
+Implement the `Metric` trait:
+
+```rust
+use umap::Metric;
+use ndarray::{Array1, ArrayView1};
+
+#[derive(Debug)]
+struct MyMetric;
+
+impl Metric for MyMetric {
+    fn distance(&self, a: ArrayView1<f32>, b: ArrayView1<f32>) -> (f32, Array1<f32>) {
+        // Return (distance, gradient)
+        // gradient = ∂distance/∂a
+        todo!()
+    }
+
+    // Optional: provide fast squared distance for optimization
+    fn squared_distance(&self, a: ArrayView1<f32>, b: ArrayView1<f32>) -> Option<f32> {
+        None  // Return Some(dist_sq) if available
+    }
+}
+
+// Use custom metric
+let umap = Umap::with_metrics(
+    config,
+    Box::new(MyMetric),       // Input space metric
+    Box::new(EuclideanMetric), // Output space metric
+);
+```
+
+See `src/distances.rs` for the Euclidean implementation example.
 
 ## Build
 
@@ -61,47 +175,35 @@ cargo build --release
 
 ## Performance
 
-Parallel optimization enabled by default. To use:
-- SGD runs in parallel across edges (Hogwild! algorithm)
-- 4-8x speedup on multi-core machines
-- Requires Rayon (already in dependencies)
-
-## Custom distance metrics
-
-Implement the `Metric` trait:
-
-```rust
-pub trait Metric: Send + Sync {
-    fn distance(&self, x: &ArrayView1<f32>, y: &ArrayView1<f32>)
-        -> (f32, Array1<f32>);
-    fn is_euclidean(&self) -> bool { false }
-}
-```
-
-Return `(distance, gradient)`. See `src/distances.rs` for Euclidean example.
+- **Parallel SGD**: Enabled by default via Rayon
+- **4-8x speedup** on multi-core machines
+- **Hogwild! algorithm**: Lock-free parallel gradient descent
+- **Euclidean fast path**: Specialized optimization using squared distances
 
 ## Documentation
 
 - [UMAP.md](UMAP.md) - How UMAP works (algorithm explanation)
 - [DIVERGENCES.md](DIVERGENCES.md) - Differences from Python umap-learn
-- [AGENTS.md](AGENTS.md) - Notes for developers/future agents
+- [AGENTS.md](AGENTS.md) - Developer notes
+
+Run `cargo doc --open` to browse the API documentation.
 
 ## Design principles
 
 1. **Minimal** - Core algorithm only, no feature creep
 2. **Fast** - Parallel by default, zero-copy where possible
 3. **Explicit** - Caller provides KNN, initialization, etc.
-4. **Auditable** - All code fits in your head (~2000 lines total)
+4. **Rust-native** - Idiomatic patterns, not Python translations
 
 ## Limitations
 
 - No input validation (assumes clean data)
-- No transform() for new points
+- Transform not yet implemented
 - Dense arrays only
-- Euclidean + generic trait (not 30+ metrics like Python)
-- Panics on invalid input (not graceful errors)
+- Panics on invalid input (not Result-based errors)
+- Requires external KNN computation and initialization
 
-This is a specialized tool for the core algorithm. Wrap it in validation/error handling if needed.
+This is a specialized tool for the core algorithm. Wrap it in validation/error handling for production use.
 
 ## License
 

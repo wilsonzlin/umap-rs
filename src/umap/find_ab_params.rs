@@ -69,8 +69,8 @@ pub fn find_ab_params(spread: f32, min_dist: f32) -> (f32, f32) {
         b -= learning_rate * grad_b / n_points as f32;
 
         // Clamp to reasonable ranges
-        a = a.max(0.001).min(10.0);
-        b = b.max(0.001).min(10.0);
+        a = a.clamp(0.001, 10.0);
+        b = b.clamp(0.001, 10.0);
 
         // Early stopping if error is small enough
         if total_error / (n_points as f32) < 1e-7 {

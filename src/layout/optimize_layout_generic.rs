@@ -36,8 +36,8 @@ fn optimize_layout_generic_single_epoch(
             let current = head_embedding.row(j);
             let other = tail_embedding.row(k);
 
-            let (dist_output, grad_dist_output) = output_metric.distance(&current, &other);
-            let (_, rev_grad_dist_output) = output_metric.distance(&other, &current);
+            let (dist_output, grad_dist_output) = output_metric.distance(current, other);
+            let (_, rev_grad_dist_output) = output_metric.distance(other, current);
 
             let mut current = head_embedding.row_mut(j);
             let mut other = tail_embedding.row_mut(k);
@@ -73,7 +73,7 @@ fn optimize_layout_generic_single_epoch(
                 let other = tail_embedding.row(k);
 
                 let (dist_output, grad_dist_output) = output_metric.distance(
-                    &current, &other
+                    current, other
                 );
 
                 let mut current = head_embedding.row_mut(j);
