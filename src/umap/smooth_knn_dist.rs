@@ -5,7 +5,7 @@ use super::constants::{SMOOTH_K_TOLERANCE, MIN_K_DIST_SCALE};
 
 #[derive(TypedBuilder, Debug)]
 pub struct SmoothKnnDist<'a> {
-  distances: &'a ArrayView2<'a, f32>,
+  distances: ArrayView2<'a, f32>,
   k: usize,
   #[builder(default = 64)]
   n_iter: usize,

@@ -16,6 +16,7 @@ use crate::{
 
 
 #[derive(TypedBuilder, Debug)]
+#[allow(dead_code)]
 pub struct Umap<'a> {
   #[builder(default = 15)]
   n_neighbors: usize,
@@ -86,9 +87,7 @@ impl<'a> Umap<'a> {
         if self.init.shape()[1] != self.n_components {
             panic!("init ndarray must match n_components value");
         }
-        if self.negative_sample_rate < 0 {
-            panic!("negative sample rate must be positive");
-        }
+        // negative_sample_rate is usize, so it's always >= 0
         if self._initial_alpha < 0.0 && !self._initial_alpha.is_nan() {
             panic!("learning_rate must be positive");
         }
@@ -121,6 +120,7 @@ impl<'a> Umap<'a> {
         }
     }
 
+    #[allow(non_snake_case)]
     pub fn fit(&mut self, X: ArrayView2<f32>) -> Array2<f32> {
         self.n = X.shape()[0];
 
@@ -151,10 +151,10 @@ impl<'a> Umap<'a> {
         let edges_removed = knn_disconnections.len();
 
         let (graph, sigmas, rhos) = FuzzySimplicialSet::builder()
-          .X(&X)
+          .n_samples(self.n)
           .n_neighbors(self.n_neighbors)
-          .knn_indices(&self.knn_indices)
-          .knn_dists(&self.knn_dists)
+          .knn_indices(self.knn_indices)
+          .knn_dists(self.knn_dists)
           .knn_disconnections(&knn_disconnections)
           .local_connectivity(self.local_connectivity)
           .set_op_mix_ratio(self.set_op_mix_ratio)
@@ -219,6 +219,7 @@ impl<'a> Umap<'a> {
         .exec()
     }
 
+    #[allow(non_snake_case)]
     pub fn fit_transform(&mut self, X: ArrayView2<f32>) -> Array2<f32> {
         self.fit(X)
     }

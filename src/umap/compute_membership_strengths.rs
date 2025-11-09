@@ -44,18 +44,18 @@ use typed_builder::TypedBuilder;
       Distance associated with each entry in the resulting sparse matrix
 */
 #[derive(TypedBuilder)]
-pub struct ComputeMembershipStrengths<'a, 's, 'r> {
-  knn_indices: &'a ArrayView2<'a, u32>,
-  knn_dists: &'a ArrayView2<'a, f32>,
+pub struct ComputeMembershipStrengths<'a, 's, 'r, 'd> {
+  knn_indices: ArrayView2<'a, u32>,
+  knn_dists: ArrayView2<'a, f32>,
   // [DIVERGE] Instead of overwriting knn_indices with -1 for disconnections, which requires mutating or expensive copying, we instead just maintain set of disconnections.
-  knn_disconnections: &'a DashSet<(usize, usize)>,
+  knn_disconnections: &'d DashSet<(usize, usize)>,
   sigmas: &'s ArrayView1<'s, f32>,
   rhos: &'r ArrayView1<'r, f32>,
   #[builder(default = false)]
   bipartite: bool,
 }
 
-impl<'a, 's, 'r> ComputeMembershipStrengths<'a, 's, 'r> {
+impl<'a, 's, 'r, 'd> ComputeMembershipStrengths<'a, 's, 'r, 'd> {
   pub fn exec(self) -> (Array1<u32>, Array1<u32>, Array1<f32>) {
     let Self {
       knn_indices,

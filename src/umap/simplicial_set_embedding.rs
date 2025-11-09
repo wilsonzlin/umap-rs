@@ -74,7 +74,7 @@ impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
             tri.add_triplet(row, col, val);
         }
     }
-    let graph = tri.to_csr();
+    let graph = tri.to_csr::<usize>();
 
     let mut embedding = init.to_owned();
 

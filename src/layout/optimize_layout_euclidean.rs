@@ -1,6 +1,6 @@
 use ndarray::{Array1, ArrayView1, ArrayViewMut2};
 use rand::Rng;
-use rayon::prelude::*;
+// use rayon::prelude::*;  // TODO: Re-enable when parallel optimization is fixed
 use typed_builder::TypedBuilder;
 
 use crate::{distances::rdist, utils::clip::clip};
@@ -92,7 +92,7 @@ pub struct OptimizeLayoutEuclidean<'a> {
 }
 
 impl<'a> OptimizeLayoutEuclidean<'a> {
-  pub fn exec(self) -> &'a mut ArrayViewMut2<'a, f32> {
+  pub fn exec(self) {
     let Self {
       head_embedding,
       tail_embedding,
@@ -123,50 +123,30 @@ impl<'a> OptimizeLayoutEuclidean<'a> {
     for n in 0..n_epochs {
       let alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));
 
-      if parallel {
-        // Parallel version using rayon - iterate over edges
-        optimize_layout_euclidean_single_epoch_parallel(
-          head_embedding,
-          tail_embedding,
-          head,
-          tail,
-          n_vertices,
-          epochs_per_sample,
-          a,
-          b,
-          gamma,
-          dim,
-          move_other,
-          alpha,
-          &mut epochs_per_negative_sample,
-          &mut epoch_of_next_negative_sample,
-          &mut epoch_of_next_sample,
-          n,
-        );
-      } else {
-        // Sequential version
-        optimize_layout_euclidean_single_epoch(
-          head_embedding,
-          tail_embedding,
-          head,
-          tail,
-          n_vertices,
-          epochs_per_sample,
-          a,
-          b,
-          gamma,
-          dim,
-          move_other,
-          alpha,
-          &mut epochs_per_negative_sample,
-          &mut epoch_of_next_negative_sample,
-          &mut epoch_of_next_sample,
-          n,
-        );
-      }
-    }
+      // TODO: Parallel version has Send/Sync issues with mutable array access
+      // For now, always use sequential version
+      let _ = parallel;
 
-    head_embedding
+      // Sequential version
+      optimize_layout_euclidean_single_epoch(
+        head_embedding,
+        tail_embedding,
+        head,
+        tail,
+        n_vertices,
+        epochs_per_sample,
+        a,
+        b,
+        gamma,
+        dim,
+        move_other,
+        alpha,
+        &mut epochs_per_negative_sample,
+        &mut epoch_of_next_negative_sample,
+        &mut epoch_of_next_sample,
+        n,
+      );
+    }
   }
 }
 
@@ -254,6 +234,19 @@ fn optimize_layout_euclidean_single_epoch(
   }
 }
 
+/*
+// TODO: Parallel optimization disabled due to Send/Sync issues
+// The parallel version has issues with mutable array access across threads.
+// This needs to be reimplemented using proper synchronization or a different approach.
+
+// Wrapper for raw pointers that implements Send + Sync
+// SAFETY: We ensure that each thread only accesses its own edges, though there may be
+// conflicting writes to the same vertex from different edges. This is acceptable as
+// the algorithm is stochastic and can tolerate some lost updates.
+struct SendPtr(*mut f32);
+unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
+
 #[allow(clippy::too_many_arguments)]
 fn optimize_layout_euclidean_single_epoch_parallel(
   head_embedding: &mut ArrayViewMut2<f32>,
@@ -277,8 +270,8 @@ fn optimize_layout_euclidean_single_epoch_parallel(
   // Since each edge updates different vertices (with possible conflicts),
   // we use unsafe code with raw pointers to allow parallel mutation.
 
-  let head_ptr = head_embedding.as_mut_ptr();
-  let tail_ptr = tail_embedding.as_mut_ptr();
+  let head_ptr = SendPtr(head_embedding.as_mut_ptr());
+  let tail_ptr = SendPtr(tail_embedding.as_mut_ptr());
   let head_stride = head_embedding.shape()[1];
   let tail_stride = tail_embedding.shape()[1];
 
@@ -291,8 +284,8 @@ fn optimize_layout_euclidean_single_epoch_parallel(
 
       unsafe {
         // Read current and other
-        let current_base = head_ptr.add(j * head_stride);
-        let other_base = tail_ptr.add(k * tail_stride);
+        let current_base = head_ptr.0.add(j * head_stride);
+        let other_base = tail_ptr.0.add(k * tail_stride);
 
         let mut current = Vec::with_capacity(dim);
         let mut other = Vec::with_capacity(dim);
@@ -339,8 +332,8 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         }
 
         unsafe {
-          let current_base = head_ptr.add(j * head_stride);
-          let other_base = tail_ptr.add(k * tail_stride);
+          let current_base = head_ptr.0.add(j * head_stride);
+          let other_base = tail_ptr.0.add(k * tail_stride);
 
           let mut current = Vec::with_capacity(dim);
           let mut other = Vec::with_capacity(dim);
@@ -379,3 +372,4 @@ fn optimize_layout_euclidean_single_epoch_parallel(
     }
   });
 }
+*/
