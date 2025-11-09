@@ -4,35 +4,30 @@ use typed_builder::TypedBuilder;
 
 use crate::{metric::Metric, utils::clip::clip};
 
-// Unused struct - optimization was inlined to avoid lifetime issues
-// #[derive(TypedBuilder)]
-// struct OptimizeLayoutGenericSingleEpoch<'a> {
-//   ...
-// }
-
-/*
-impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
-  pub fn exec(self) {
-    let Self {
-      epochs_per_sample,
-      epoch_of_next_sample,
-      head,
-      tail,
-      head_embedding,
-      tail_embedding,
-      output_metric,
-      dim,
-      alpha,
-      move_other,
-      n,
-      epoch_of_next_negative_sample,
-      epochs_per_negative_sample,
-      n_vertices,
-      a,
-      b,
-      gamma,
-    } = self;
-
+/// Performs a single epoch of generic (metric-agnostic) SGD optimization.
+///
+/// This is extracted as a standalone function to avoid lifetime complexities
+/// while maintaining clean code structure.
+#[allow(clippy::too_many_arguments)]
+fn optimize_layout_generic_single_epoch(
+    head_embedding: &mut ArrayViewMut2<f32>,
+    tail_embedding: &mut ArrayViewMut2<f32>,
+    head: &ArrayView1<u32>,
+    tail: &ArrayView1<u32>,
+    epochs_per_sample: &ArrayView1<f64>,
+    epoch_of_next_sample: &mut Array1<f64>,
+    epoch_of_next_negative_sample: &mut Array1<f64>,
+    epochs_per_negative_sample: &Array1<f64>,
+    output_metric: &dyn Metric,
+    dim: usize,
+    alpha: f32,
+    move_other: bool,
+    n: usize,
+    n_vertices: usize,
+    a: f32,
+    b: f32,
+    gamma: f32,
+) {
     for i in 0..epochs_per_sample.shape()[0] {
         if epoch_of_next_sample[i] <= n as f64 {
             let j = head[i] as usize;
@@ -101,11 +96,9 @@ impl<'a> OptimizeLayoutGenericSingleEpoch<'a> {
 
             epoch_of_next_negative_sample[i] +=
                 n_neg_samples as f64 * epochs_per_negative_sample[i];
-        };
+        }
     }
-  }
 }
-*/
 
 /*
   Improve an embedding using stochastic gradient descent to minimize the
@@ -223,77 +216,25 @@ impl<'a> OptimizeLayoutGeneric<'a> {
     let mut epoch_of_next_sample = epochs_per_sample.to_owned();
 
     for n in 0..n_epochs {
-      // Inline the single epoch optimization to avoid lifetime issues
-      for i in 0..epochs_per_sample.shape()[0] {
-        if epoch_of_next_sample[i] <= n as f64 {
-          let j = head[i] as usize;
-          let k = tail[i] as usize;
-
-          let current = head_embedding.row(j);
-          let other = tail_embedding.row(k);
-
-          let (dist_output, grad_dist_output) = output_metric.distance(&current, &other);
-          let (_, rev_grad_dist_output) = output_metric.distance(&other, &current);
-
-          let mut current = head_embedding.row_mut(j);
-          let mut other = tail_embedding.row_mut(k);
-
-          let w_l = if dist_output > 0.0 {
-            f32::powi(1.0 + a * f32::powf(dist_output, 2.0 * b), -1)
-          } else {
-            1.0
-          };
-          let grad_coeff = 2.0 * b * (w_l - 1.0) / (dist_output + 1e-6);
-
-          for d in 0..dim {
-            let mut grad_d = clip(grad_coeff * grad_dist_output[d]);
-
-            current[d] += grad_d * alpha;
-            if move_other {
-              grad_d = clip(grad_coeff * rev_grad_dist_output[d]);
-              other[d] += grad_d * alpha;
-            }
-          }
-
-          epoch_of_next_sample[i] += epochs_per_sample[i];
-
-          let n_neg_samples = (
-            (n as f64 - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]
-          ) as usize;
-
-          let mut rng = rand::rng();
-          for _p in 0..n_neg_samples {
-            let k = rng.random_range(0..n_vertices);
-
-            let current = head_embedding.row(j);
-            let other = tail_embedding.row(k);
-
-            let (dist_output, grad_dist_output) = output_metric.distance(
-              &current, &other
-            );
-
-            let mut current = head_embedding.row_mut(j);
-
-            let w_l = if dist_output > 0.0 {
-              f32::powi(1.0 + a * f32::powf(dist_output, 2.0 * b), -1)
-            } else if j == k {
-              continue
-            } else {
-              1.0
-            };
-
-            let grad_coeff = gamma * 2.0 * b * w_l / (dist_output + 1e-6);
-
-            for d in 0..dim {
-              let grad_d = clip(grad_coeff * grad_dist_output[d]);
-              current[d] += grad_d * alpha;
-            }
-          }
-
-          epoch_of_next_negative_sample[i] +=
-            n_neg_samples as f64 * epochs_per_negative_sample[i];
-        }
-      }
+      optimize_layout_generic_single_epoch(
+        head_embedding,
+        tail_embedding,
+        head,
+        tail,
+        epochs_per_sample,
+        &mut epoch_of_next_sample,
+        &mut epoch_of_next_negative_sample,
+        &epochs_per_negative_sample,
+        output_metric,
+        dim,
+        alpha,
+        move_other,
+        n,
+        n_vertices,
+        a,
+        b,
+        gamma,
+      );
       alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));
     }
   }
