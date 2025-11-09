@@ -1,17 +1,17 @@
-# How UMAP Works: Engineer's Guide
+# How UMAP works
 
 UMAP (Uniform Manifold Approximation and Projection) compresses high-dimensional data into 2D/3D while preserving local neighborhoods. Think: "keep nearby points nearby, don't worry much about far points."
 
-## The Big Idea
+## Core concept
 
 **Input:** 1000 samples × 784 features (e.g., MNIST digits)
 **Output:** 1000 samples × 2 coordinates (plottable!)
 
 **Core insight:** High-dimensional data often lies on a lower-dimensional manifold (like a curved surface embedded in high-D space). UMAP learns this manifold structure and flattens it.
 
-## Algorithm Steps
+## Algorithm steps
 
-### 1. Find K-Nearest Neighbors (KNN)
+### 1. Find k-nearest neighbors
 
 For each point, find its 15 nearest neighbors (default k=15) in high-D space using Euclidean distance.
 
@@ -22,7 +22,7 @@ Point B: [neighbors: A, F, G, H, ...]
 
 This is just brute-force distance calculation or a fast ANN index.
 
-### 2. Build Fuzzy Graph (Membership Strengths)
+### 2. Build fuzzy graph (membership strengths)
 
 **Problem:** KNN is too rigid - either you're a neighbor or not.
 
@@ -37,7 +37,7 @@ For each point `i` and its neighbor `j`:
 
 **Intuition:** Nearby points get high weights (~1.0), far points get low weights (~0.0). The exponential decay is calibrated so each point sees roughly k neighbors with significant weight.
 
-### 3. Symmetrize Graph (Fuzzy Set Union)
+### 3. Symmetrize graph (fuzzy set union)
 
 The graph from step 2 is asymmetric: `wᵢⱼ ≠ wⱼᵢ` (i might think j is close, but j disagrees).
 
@@ -50,7 +50,7 @@ This is probabilistic OR: "i→j OR j→i is an edge."
 
 **Result:** Undirected weighted graph representing the high-D manifold.
 
-### 4. Initialize Low-D Embedding
+### 4. Initialize low-dimensional embedding
 
 Need starting positions for 1000 points in 2D space.
 
@@ -61,7 +61,7 @@ Need starting positions for 1000 points in 2D space.
 
 **Why spectral?** Gives decent initial layout that roughly respects graph structure. Better than random → faster convergence.
 
-### 5. Optimize Layout via SGD (The Magic)
+### 5. Optimize layout via SGD
 
 **Goal:** Move points in 2D to match the high-D graph structure.
 
@@ -119,7 +119,7 @@ edges.par_iter().for_each(|edge| {
 
 **Result:** 4-8x speedup with negligible accuracy loss.
 
-## Intuitive Analogy
+## Intuitive analogy
 
 **Physical simulation:**
 - Start with points randomly scattered in 2D
@@ -127,7 +127,7 @@ edges.par_iter().for_each(|edge| {
 - All points repel each other like charged particles (repulsive force)
 - Run physics simulation → points settle into configuration that respects high-D structure
 
-## Why UMAP > t-SNE
+## Comparison to t-SNE
 
 | Feature | t-SNE | UMAP |
 |---------|-------|------|
@@ -137,7 +137,7 @@ edges.par_iter().for_each(|edge| {
 | **Theory** | Ad-hoc | Grounded in manifold theory |
 | **Tuning** | Sensitive to perplexity | More robust defaults |
 
-## Code Flow in This Repo
+## Code flow in this repo
 
 ```
 umap.fit(X)
@@ -153,7 +153,7 @@ umap.fit(X)
 └─ Return 2D embedding
 ```
 
-## Practical Tips
+## Practical tips
 
 **When to use UMAP:**
 - Visualization of high-D data (the primary use case)
@@ -171,6 +171,6 @@ umap.fit(X)
 - Distances in 2D are NOT metric (close = similar, but far ≠ dissimilar)
 - Only fit() is implemented here, no transform() for new points
 
-## Mathematical Footnote
+## Mathematical footnote
 
 The fuzzy set operations and membership functions come from category theory / algebraic topology. The "manifold" interpretation: locally, high-D data looks Euclidean, globally it's curved. UMAP learns this curvature via the graph, then flattens it. The `a, b` parameters are derived from a specific choice of distance function on the manifold. You don't need to understand this to use UMAP effectively.

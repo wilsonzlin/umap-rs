@@ -157,7 +157,7 @@ The port maintains semantic equivalence by:
 ✓ Type definitions:        ~300 lines  (builders, structs)
 ✓ Utilities:               ~200 lines  (clip, constants)
 ✓ Distance metrics:        ~100 lines  (Euclidean + trait)
-✓ Documentation:           ~200 lines  (this + HOW_UMAP_WORKS.md)
+✓ Documentation:           ~200 lines  (this + UMAP.md)
 
 ✗ Validation:                 0 lines  (assumes caller provides clean data)
 ✗ Transform:                  0 lines  (fit only)
