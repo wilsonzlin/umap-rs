@@ -105,7 +105,7 @@ This is a specialized tool for the core algorithm. Wrap it in validation/error h
 
 ## License
 
-[Your license here]
+BSD-3-Clause (see LICENSE file)
 
 ## References
 
