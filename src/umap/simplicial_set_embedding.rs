@@ -38,7 +38,11 @@ impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
       output_metric,
     } = self;
 
-    let euclidean_output = output_metric.is_euclidean();
+    // Check if metric provides fast squared distance (indicates Euclidean-like metric)
+    let euclidean_output = output_metric.squared_distance(
+        ndarray::ArrayView1::from(&[0.0]),
+        ndarray::ArrayView1::from(&[0.0])
+    ).is_some();
 
     // Convert to CSR if not already
     let graph = graph.to_csr();

@@ -102,7 +102,7 @@ impl<'a> Umap<'a> {
         // We have preset defaults described in DISCONNECTION_DISTANCES for our bounded measures.
         // Otherwise a user can pass in their own value.
         if self.disconnection_distance.is_nan() {
-          self.disconnection_distance = self.metric.default_disconnection_distance();
+          self.disconnection_distance = self.metric.disconnection_threshold();
         };
 
         if self.knn_dists.shape() != self.knn_indices.shape() {

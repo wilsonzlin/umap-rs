@@ -133,10 +133,8 @@ impl<'a> SmoothKnnDist<'a> {
           if result[i] < MIN_K_DIST_SCALE * mean_ith_distances {
             result[i] = MIN_K_DIST_SCALE * mean_ith_distances;
           }
-        } else {
-          if result[i] < MIN_K_DIST_SCALE * mean_distances {
-            result[i] = MIN_K_DIST_SCALE * mean_distances;
-          }
+        } else if result[i] < MIN_K_DIST_SCALE * mean_distances {
+          result[i] = MIN_K_DIST_SCALE * mean_distances;
         }
     }
 
