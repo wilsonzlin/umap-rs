@@ -1,9 +1,11 @@
-use ndarray::{Array1, ArrayView1, ArrayViewMut2};
+use crate::distances::rdist;
+use crate::utils::clip::clip;
+use ndarray::Array1;
+use ndarray::ArrayView1;
+use ndarray::ArrayViewMut2;
 use rand::Rng;
 use rayon::prelude::*;
 use typed_builder::TypedBuilder;
-
-use crate::{distances::rdist, utils::clip::clip};
 
 /// Wrapper to allow concurrent mutable access to embedding arrays in parallel SGD.
 ///
@@ -28,33 +30,33 @@ use crate::{distances::rdist, utils::clip::clip};
 /// - Hogwild! algorithm (Recht et al., 2011)
 /// - Numba's parallel prange with relaxed memory ordering
 struct UnsafeSyncCell<T> {
-    ptr: *mut T,
+  ptr: *mut T,
 }
 
 unsafe impl<T> Send for UnsafeSyncCell<T> {}
 unsafe impl<T> Sync for UnsafeSyncCell<T> {}
 
 impl<T> UnsafeSyncCell<T> {
-    /// Creates a new UnsafeSyncCell from a mutable pointer.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that:
-    /// - The pointer remains valid for the lifetime of this cell
-    /// - Concurrent unsynchronized access is acceptable for the use case
-    unsafe fn new(ptr: *mut T) -> Self {
-        Self { ptr }
-    }
+  /// Creates a new UnsafeSyncCell from a mutable pointer.
+  ///
+  /// # Safety
+  ///
+  /// The caller must ensure that:
+  /// - The pointer remains valid for the lifetime of this cell
+  /// - Concurrent unsynchronized access is acceptable for the use case
+  unsafe fn new(ptr: *mut T) -> Self {
+    Self { ptr }
+  }
 
-    /// Returns the underlying mutable pointer.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure proper synchronization if required by the use case.
-    #[inline(always)]
-    fn get(&self) -> *mut T {
-        self.ptr
-    }
+  /// Returns the underlying mutable pointer.
+  ///
+  /// # Safety
+  ///
+  /// The caller must ensure proper synchronization if required by the use case.
+  #[inline(always)]
+  fn get(&self) -> *mut T {
+    self.ptr
+  }
 }
 
 /*
@@ -268,8 +270,8 @@ fn optimize_layout_euclidean_single_epoch(
 
       epoch_of_next_sample[i] += epochs_per_sample[i];
 
-      let n_neg_samples = ((n as f64 - epoch_of_next_negative_sample[i])
-        / epochs_per_negative_sample[i]) as usize;
+      let n_neg_samples =
+        ((n as f64 - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]) as usize;
 
       for _p in 0..n_neg_samples {
         let k = rng.random_range(0..n_vertices);
@@ -386,8 +388,8 @@ fn optimize_layout_euclidean_single_epoch_parallel(
 
         *epoch_sample_ptr.add(i) += epochs_per_sample[i];
 
-        let n_neg_samples = ((n as f64 - *epoch_neg_ptr.add(i))
-          / epochs_per_negative_sample[i]) as usize;
+        let n_neg_samples =
+          ((n as f64 - *epoch_neg_ptr.add(i)) / epochs_per_negative_sample[i]) as usize;
 
         for _p in 0..n_neg_samples {
           let k = rng.random_range(0..n_vertices);

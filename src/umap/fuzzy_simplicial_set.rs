@@ -1,15 +1,14 @@
-use std::iter::zip;
-
+use crate::umap::compute_membership_strengths::ComputeMembershipStrengths;
+use crate::umap::smooth_knn_dist::SmoothKnnDist;
 use dashmap::DashSet;
 use itertools::izip;
-use ndarray::{Array1, ArrayView2};
-use sprs::{CsMat, CsMatView, TriMat};
+use ndarray::Array1;
+use ndarray::ArrayView2;
+use sprs::CsMat;
+use sprs::CsMatView;
+use sprs::TriMat;
+use std::iter::zip;
 use typed_builder::TypedBuilder;
-
-use crate::umap::{
-    compute_membership_strengths::ComputeMembershipStrengths,
-    smooth_knn_dist::SmoothKnnDist,
-};
 
 /*
   Given a set of data X, a neighborhood size, and a measure of distance
@@ -119,33 +118,33 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
         if v != 0.0 {
           mat.add_triplet(r as usize, c as usize, v);
         }
-      };
+      }
       mat.to_csr::<usize>()
     };
 
     if apply_set_operations {
-        let transpose = result.transpose_view().to_csr();
-        let prod_matrix = hadamard(&result.view(), &transpose.view());
+      let transpose = result.transpose_view().to_csr();
+      let prod_matrix = hadamard(&result.view(), &transpose.view());
 
-        // Compute: set_op_mix_ratio * (result + transpose - prod_matrix) + (1 - set_op_mix_ratio) * prod_matrix
-        // This simplifies to: set_op_mix_ratio * (result + transpose) + (1 - 2*set_op_mix_ratio) * prod_matrix
-        let mut tri = TriMat::new(result.shape());
+      // Compute: set_op_mix_ratio * (result + transpose - prod_matrix) + (1 - set_op_mix_ratio) * prod_matrix
+      // This simplifies to: set_op_mix_ratio * (result + transpose) + (1 - 2*set_op_mix_ratio) * prod_matrix
+      let mut tri = TriMat::new(result.shape());
 
-        // Add set_op_mix_ratio * (result + transpose)
-        for (val, (row, col)) in result.iter() {
-            tri.add_triplet(row, col, set_op_mix_ratio * val);
-        }
-        for (val, (row, col)) in transpose.iter() {
-            tri.add_triplet(row, col, set_op_mix_ratio * val);
-        }
+      // Add set_op_mix_ratio * (result + transpose)
+      for (val, (row, col)) in result.iter() {
+        tri.add_triplet(row, col, set_op_mix_ratio * val);
+      }
+      for (val, (row, col)) in transpose.iter() {
+        tri.add_triplet(row, col, set_op_mix_ratio * val);
+      }
 
-        // Add (1 - 2*set_op_mix_ratio) * prod_matrix
-        let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio + set_op_mix_ratio;
-        for (val, (row, col)) in prod_matrix.iter() {
-            tri.add_triplet(row, col, prod_coeff * val);
-        }
+      // Add (1 - 2*set_op_mix_ratio) * prod_matrix
+      let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio + set_op_mix_ratio;
+      for (val, (row, col)) in prod_matrix.iter() {
+        tri.add_triplet(row, col, prod_coeff * val);
+      }
 
-        result = tri.to_csr::<usize>();
+      result = tri.to_csr::<usize>();
     }
 
     (result, sigmas, rhos)
@@ -158,14 +157,14 @@ fn hadamard(a: &CsMatView<f32>, b: &CsMatView<f32>) -> CsMat<f32> {
   let mut tri = TriMat::new(a.shape());
   // iterate nonzeros of `a`
   for (row, vec) in a.outer_iterator().enumerate() {
-      for (&col, &av) in zip(vec.indices().iter(), vec.data()) {
-          if let Some(&bv) = b.get(row, col) {
-              let prod = av * bv;
-              if prod != 0.0 {
-                  tri.add_triplet(row, col, prod);
-              }
-          }
+    for (&col, &av) in zip(vec.indices().iter(), vec.data()) {
+      if let Some(&bv) = b.get(row, col) {
+        let prod = av * bv;
+        if prod != 0.0 {
+          tri.add_triplet(row, col, prod);
+        }
       }
+    }
   }
   tri.to_csr::<usize>()
 }

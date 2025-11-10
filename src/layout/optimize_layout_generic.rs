@@ -1,8 +1,10 @@
-use ndarray::{Array1, ArrayView1, ArrayViewMut2};
+use crate::metric::Metric;
+use crate::utils::clip::clip;
+use ndarray::Array1;
+use ndarray::ArrayView1;
+use ndarray::ArrayViewMut2;
 use rand::Rng;
 use typed_builder::TypedBuilder;
-
-use crate::{metric::Metric, utils::clip::clip};
 
 /// Performs a single epoch of generic (metric-agnostic) SGD optimization.
 ///
@@ -10,94 +12,90 @@ use crate::{metric::Metric, utils::clip::clip};
 /// while maintaining clean code structure.
 #[allow(clippy::too_many_arguments)]
 fn optimize_layout_generic_single_epoch(
-    head_embedding: &mut ArrayViewMut2<f32>,
-    tail_embedding: &mut ArrayViewMut2<f32>,
-    head: &ArrayView1<u32>,
-    tail: &ArrayView1<u32>,
-    epochs_per_sample: &ArrayView1<f64>,
-    epoch_of_next_sample: &mut Array1<f64>,
-    epoch_of_next_negative_sample: &mut Array1<f64>,
-    epochs_per_negative_sample: &Array1<f64>,
-    output_metric: &dyn Metric,
-    dim: usize,
-    alpha: f32,
-    move_other: bool,
-    n: usize,
-    n_vertices: usize,
-    a: f32,
-    b: f32,
-    gamma: f32,
+  head_embedding: &mut ArrayViewMut2<f32>,
+  tail_embedding: &mut ArrayViewMut2<f32>,
+  head: &ArrayView1<u32>,
+  tail: &ArrayView1<u32>,
+  epochs_per_sample: &ArrayView1<f64>,
+  epoch_of_next_sample: &mut Array1<f64>,
+  epoch_of_next_negative_sample: &mut Array1<f64>,
+  epochs_per_negative_sample: &Array1<f64>,
+  output_metric: &dyn Metric,
+  dim: usize,
+  alpha: f32,
+  move_other: bool,
+  n: usize,
+  n_vertices: usize,
+  a: f32,
+  b: f32,
+  gamma: f32,
 ) {
-    for i in 0..epochs_per_sample.shape()[0] {
-        if epoch_of_next_sample[i] <= n as f64 {
-            let j = head[i] as usize;
-            let k = tail[i] as usize;
+  for i in 0..epochs_per_sample.shape()[0] {
+    if epoch_of_next_sample[i] <= n as f64 {
+      let j = head[i] as usize;
+      let k = tail[i] as usize;
 
-            let current = head_embedding.row(j);
-            let other = tail_embedding.row(k);
+      let current = head_embedding.row(j);
+      let other = tail_embedding.row(k);
 
-            let (dist_output, grad_dist_output) = output_metric.distance(current, other);
-            let (_, rev_grad_dist_output) = output_metric.distance(other, current);
+      let (dist_output, grad_dist_output) = output_metric.distance(current, other);
+      let (_, rev_grad_dist_output) = output_metric.distance(other, current);
 
-            let mut current = head_embedding.row_mut(j);
-            let mut other = tail_embedding.row_mut(k);
+      let mut current = head_embedding.row_mut(j);
+      let mut other = tail_embedding.row_mut(k);
 
-            let w_l = if dist_output > 0.0 {
-                f32::powi(1.0 + a * f32::powf(dist_output, 2.0 * b), -1)
-            } else {
-                1.0
-            };
-            let grad_coeff = 2.0 * b * (w_l - 1.0) / (dist_output + 1e-6);
+      let w_l = if dist_output > 0.0 {
+        f32::powi(1.0 + a * f32::powf(dist_output, 2.0 * b), -1)
+      } else {
+        1.0
+      };
+      let grad_coeff = 2.0 * b * (w_l - 1.0) / (dist_output + 1e-6);
 
-            for d in 0..dim {
-                let mut grad_d = clip(grad_coeff * grad_dist_output[d]);
+      for d in 0..dim {
+        let mut grad_d = clip(grad_coeff * grad_dist_output[d]);
 
-                current[d] += grad_d * alpha;
-                if move_other {
-                    grad_d = clip(grad_coeff * rev_grad_dist_output[d]);
-                    other[d] += grad_d * alpha;
-                }
-            }
-
-            epoch_of_next_sample[i] += epochs_per_sample[i];
-
-            let n_neg_samples = (
-                (n as f64 - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]
-            ) as usize;
-
-            let mut rng = rand::rng();
-            for _p in 0..n_neg_samples {
-                let k = rng.random_range(0..n_vertices);
-
-                let current = head_embedding.row(j);
-                let other = tail_embedding.row(k);
-
-                let (dist_output, grad_dist_output) = output_metric.distance(
-                    current, other
-                );
-
-                let mut current = head_embedding.row_mut(j);
-
-                let w_l = if dist_output > 0.0 {
-                    f32::powi(1.0 + a * f32::powf(dist_output, 2.0 * b), -1)
-                } else if j == k {
-                    continue
-                } else {
-                    1.0
-                };
-
-                let grad_coeff = gamma * 2.0 * b * w_l / (dist_output + 1e-6);
-
-                for d in 0..dim {
-                    let grad_d = clip(grad_coeff * grad_dist_output[d]);
-                    current[d] += grad_d * alpha;
-                }
-            }
-
-            epoch_of_next_negative_sample[i] +=
-                n_neg_samples as f64 * epochs_per_negative_sample[i];
+        current[d] += grad_d * alpha;
+        if move_other {
+          grad_d = clip(grad_coeff * rev_grad_dist_output[d]);
+          other[d] += grad_d * alpha;
         }
+      }
+
+      epoch_of_next_sample[i] += epochs_per_sample[i];
+
+      let n_neg_samples =
+        ((n as f64 - epoch_of_next_negative_sample[i]) / epochs_per_negative_sample[i]) as usize;
+
+      let mut rng = rand::rng();
+      for _p in 0..n_neg_samples {
+        let k = rng.random_range(0..n_vertices);
+
+        let current = head_embedding.row(j);
+        let other = tail_embedding.row(k);
+
+        let (dist_output, grad_dist_output) = output_metric.distance(current, other);
+
+        let mut current = head_embedding.row_mut(j);
+
+        let w_l = if dist_output > 0.0 {
+          f32::powi(1.0 + a * f32::powf(dist_output, 2.0 * b), -1)
+        } else if j == k {
+          continue;
+        } else {
+          1.0
+        };
+
+        let grad_coeff = gamma * 2.0 * b * w_l / (dist_output + 1e-6);
+
+        for d in 0..dim {
+          let grad_d = clip(grad_coeff * grad_dist_output[d]);
+          current[d] += grad_d * alpha;
+        }
+      }
+
+      epoch_of_next_negative_sample[i] += n_neg_samples as f64 * epochs_per_negative_sample[i];
     }
+  }
 }
 
 /*

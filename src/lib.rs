@@ -56,16 +56,20 @@ pub mod config;
 pub mod metric;
 
 // Public re-exports (primary API)
-pub use config::{UmapConfig, ManifoldParams, GraphParams, OptimizationParams};
+pub use config::GraphParams;
+pub use config::ManifoldParams;
+pub use config::OptimizationParams;
+pub use config::UmapConfig;
+pub use embedding::FittedUmap;
+pub use embedding::Umap;
 pub use metric::Metric;
-pub use embedding::{Umap, FittedUmap};
 
 // Internal modules (not exposed)
-mod embedding;
-mod umap;
-mod layout;
-mod utils;
 mod distances;
+mod embedding;
+mod layout;
+mod umap;
+mod utils;
 
 // Re-export distances for convenience
 pub use distances::EuclideanMetric;

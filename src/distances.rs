@@ -1,6 +1,6 @@
-use ndarray::{Array1, ArrayView1};
-
 use crate::metric::Metric;
+use ndarray::Array1;
+use ndarray::ArrayView1;
 
 /// Euclidean (L2) distance metric.
 ///
@@ -10,48 +10,48 @@ use crate::metric::Metric;
 pub struct EuclideanMetric;
 
 impl Metric for EuclideanMetric {
-    /// Compute Euclidean distance and its gradient.
-    ///
-    /// Returns (distance, gradient) where gradient = (x - y) / (distance + ε)
-    /// The epsilon term prevents division by zero when points are identical.
-    fn distance(&self, x: ArrayView1<f32>, y: ArrayView1<f32>) -> (f32, Array1<f32>) {
-        let mut sum_sq = 0.0;
-        for i in 0..x.len() {
-            let diff = x[i] - y[i];
-            sum_sq += diff * diff;
-        }
-        let dist = sum_sq.sqrt();
+  /// Compute Euclidean distance and its gradient.
+  ///
+  /// Returns (distance, gradient) where gradient = (x - y) / (distance + ε)
+  /// The epsilon term prevents division by zero when points are identical.
+  fn distance(&self, x: ArrayView1<f32>, y: ArrayView1<f32>) -> (f32, Array1<f32>) {
+    let mut sum_sq = 0.0;
+    for i in 0..x.len() {
+      let diff = x[i] - y[i];
+      sum_sq += diff * diff;
+    }
+    let dist = sum_sq.sqrt();
 
-        let mut grad = Array1::zeros(x.len());
-        let denom = dist + 1e-6;
-        for i in 0..x.len() {
-            grad[i] = (x[i] - y[i]) / denom;
-        }
-
-        (dist, grad)
+    let mut grad = Array1::zeros(x.len());
+    let denom = dist + 1e-6;
+    for i in 0..x.len() {
+      grad[i] = (x[i] - y[i]) / denom;
     }
 
-    fn disconnection_threshold(&self) -> f32 {
-        f32::INFINITY
-    }
+    (dist, grad)
+  }
 
-    /// Provides optimized squared Euclidean distance (avoids sqrt).
-    ///
-    /// This enables the specialized Euclidean optimization path which is
-    /// significantly faster than the generic metric path.
-    fn squared_distance(&self, x: ArrayView1<f32>, y: ArrayView1<f32>) -> Option<f32> {
-        Some(rdist(&x, &y))
-    }
+  fn disconnection_threshold(&self) -> f32 {
+    f32::INFINITY
+  }
+
+  /// Provides optimized squared Euclidean distance (avoids sqrt).
+  ///
+  /// This enables the specialized Euclidean optimization path which is
+  /// significantly faster than the generic metric path.
+  fn squared_distance(&self, x: ArrayView1<f32>, y: ArrayView1<f32>) -> Option<f32> {
+    Some(rdist(&x, &y))
+  }
 }
 
 /// Squared Euclidean distance (rdist) - used in euclidean optimization for speed
 /// This avoids the sqrt operation
 #[inline]
 pub fn rdist(x: &ArrayView1<f32>, y: &ArrayView1<f32>) -> f32 {
-    let mut sum_sq = 0.0;
-    for i in 0..x.len() {
-        let diff = x[i] - y[i];
-        sum_sq += diff * diff;
-    }
-    sum_sq
+  let mut sum_sq = 0.0;
+  for i in 0..x.len() {
+    let diff = x[i] - y[i];
+    sum_sq += diff * diff;
+  }
+  sum_sq
 }

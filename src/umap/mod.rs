@@ -1,8 +1,8 @@
-pub mod constants;
-pub mod smooth_knn_dist;
 pub mod compute_membership_strengths;
-pub mod fuzzy_simplicial_set;
-pub mod simplicial_set_embedding;
+pub mod constants;
 pub mod find_ab_params;
+pub mod fuzzy_simplicial_set;
 pub mod make_epochs_per_sample;
 pub mod raise_disconnected_warning;
+pub mod simplicial_set_embedding;
+pub mod smooth_knn_dist;

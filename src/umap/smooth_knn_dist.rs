@@ -1,7 +1,8 @@
-use ndarray::{Array1, ArrayView2};
+use super::constants::MIN_K_DIST_SCALE;
+use super::constants::SMOOTH_K_TOLERANCE;
+use ndarray::Array1;
+use ndarray::ArrayView2;
 use typed_builder::TypedBuilder;
-
-use super::constants::{SMOOTH_K_TOLERANCE, MIN_K_DIST_SCALE};
 
 #[derive(TypedBuilder, Debug)]
 pub struct SmoothKnnDist<'a> {
@@ -61,7 +62,7 @@ impl<'a> SmoothKnnDist<'a> {
       k,
       n_iter,
       local_connectivity,
-      bandwidth
+      bandwidth,
     } = self;
 
     let target = (k as f32).log2() * bandwidth;
@@ -71,71 +72,73 @@ impl<'a> SmoothKnnDist<'a> {
     let mean_distances = distances.mean().unwrap();
 
     for i in 0..distances.shape()[0] {
-        let mut lo = 0.0;
-        let mut hi = f32::INFINITY;
-        let mut mid = 1.0;
+      let mut lo = 0.0;
+      let mut hi = f32::INFINITY;
+      let mut mid = 1.0;
 
-        let ith_distances = distances.row(i);
-        let non_zero_dists: Vec<f32> = ith_distances.iter()
-            .filter(|&&d| d > 0.0)
-            .copied()
-            .collect();
+      let ith_distances = distances.row(i);
+      let non_zero_dists: Vec<f32> = ith_distances
+        .iter()
+        .filter(|&&d| d > 0.0)
+        .copied()
+        .collect();
 
-        if non_zero_dists.len() >= local_connectivity as usize {
-            let index = local_connectivity.floor() as usize;
-            let interpolation = local_connectivity - local_connectivity.floor();
-            if index > 0 {
-                rho[i] = non_zero_dists[index - 1];
-                if interpolation > SMOOTH_K_TOLERANCE {
-                    rho[i] += interpolation * (
-                        non_zero_dists[index] - non_zero_dists[index - 1]
-                    );
-                }
-            } else {
-                rho[i] = interpolation * non_zero_dists[0];
-            }
-        } else if !non_zero_dists.is_empty() {
-            rho[i] = *non_zero_dists.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-        }
-
-        for _n in 0..n_iter {
-            let mut psum = 0.0;
-            for j in 1..distances.shape()[1] {
-                let d = distances[(i, j)] - rho[i];
-                if d > 0.0 {
-                    psum += f32::exp(-(d / mid));
-                } else {
-                    psum += 1.0;
-                }
-            }
-
-            if f32::abs(psum - target) < SMOOTH_K_TOLERANCE {
-                break;
-            }
-
-            if psum > target {
-                hi = mid;
-                mid = (lo + hi) / 2.0;
-            } else {
-                lo = mid;
-                if hi == f32::INFINITY {
-                    mid *= 2.0
-                } else {
-                    mid = (lo + hi) / 2.0;
-                }
-            }
-        }
-
-        result[i] = mid;
-
-        if rho[i] > 0.0 {
-          let mean_ith_distances = ith_distances.mean().unwrap();
-          if result[i] < MIN_K_DIST_SCALE * mean_ith_distances {
-            result[i] = MIN_K_DIST_SCALE * mean_ith_distances;
+      if non_zero_dists.len() >= local_connectivity as usize {
+        let index = local_connectivity.floor() as usize;
+        let interpolation = local_connectivity - local_connectivity.floor();
+        if index > 0 {
+          rho[i] = non_zero_dists[index - 1];
+          if interpolation > SMOOTH_K_TOLERANCE {
+            rho[i] += interpolation * (non_zero_dists[index] - non_zero_dists[index - 1]);
           }
-        } else if result[i] < MIN_K_DIST_SCALE * mean_distances {
-          result[i] = MIN_K_DIST_SCALE * mean_distances;
+        } else {
+          rho[i] = interpolation * non_zero_dists[0];
         }
+      } else if !non_zero_dists.is_empty() {
+        rho[i] = *non_zero_dists
+          .iter()
+          .max_by(|a, b| a.partial_cmp(b).unwrap())
+          .unwrap();
+      }
+
+      for _n in 0..n_iter {
+        let mut psum = 0.0;
+        for j in 1..distances.shape()[1] {
+          let d = distances[(i, j)] - rho[i];
+          if d > 0.0 {
+            psum += f32::exp(-(d / mid));
+          } else {
+            psum += 1.0;
+          }
+        }
+
+        if f32::abs(psum - target) < SMOOTH_K_TOLERANCE {
+          break;
+        }
+
+        if psum > target {
+          hi = mid;
+          mid = (lo + hi) / 2.0;
+        } else {
+          lo = mid;
+          if hi == f32::INFINITY {
+            mid *= 2.0
+          } else {
+            mid = (lo + hi) / 2.0;
+          }
+        }
+      }
+
+      result[i] = mid;
+
+      if rho[i] > 0.0 {
+        let mean_ith_distances = ith_distances.mean().unwrap();
+        if result[i] < MIN_K_DIST_SCALE * mean_ith_distances {
+          result[i] = MIN_K_DIST_SCALE * mean_ith_distances;
+        }
+      } else if result[i] < MIN_K_DIST_SCALE * mean_distances {
+        result[i] = MIN_K_DIST_SCALE * mean_distances;
+      }
     }
 
     (result, rho)
