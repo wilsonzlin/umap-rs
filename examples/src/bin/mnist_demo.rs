@@ -21,7 +21,6 @@ use umap::UmapConfig;
 
 #[derive(Parser)]
 #[command(name = "MNIST UMAP Demo")]
-#[command(about = "Demonstrates UMAP dimensionality reduction on MNIST dataset")]
 struct Args {
   /// Initialization method
   #[arg(short, long, default_value = "spectral")]
