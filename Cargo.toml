@@ -1,26 +1,12 @@
-[package]
-name = "umap"
-version = "0.1.0"
-edition = "2024"
-license = "BSD-3-Clause"
+[workspace]
+resolver = "2"
+members = [
+  "examples",
+  "umap-rs",
+]
 
-[dependencies]
-dashmap = { version = "6.1.0", features = ["rayon"] }
-indicatif = "0.18.0"
-itertools = "0.14.0"
-ndarray = "0.17"
-rand = "0.9.1"
-rayon = "1.10.0"
-sprs = "0.11.3"
-tracing = "0.1.41"
-typed-builder = "0.21.0"
-clap = { version = "4", features = ["derive"], optional = true }
-mnist = { version = "0.6", optional = true }
-ndarray-linalg = { version = "0.18", features = ["openblas-static"], optional = true }
-plotters = { version = "0.3", optional = true }
-ureq = { version = "3", optional = true }
-flate2 = { version = "1", optional = true }
-
-[[example]]
-name = "mnist_demo"
-required-features = ["clap", "mnist", "ndarray-linalg", "plotters", "ureq", "flate2"]
+[profile.release]
+codegen-units = 1
+debug = true
+lto = true
+opt-level = 3
