@@ -37,11 +37,12 @@ let config = UmapConfig {
 // Create UMAP instance
 let umap = Umap::new(config);
 
-// Precompute KNN (use your favorite ANN library)
+// Precompute KNN (use your favorite ANN library: pynndescent, hnswlib, etc.)
 let knn_indices: Array2<u32> = /* shape (n_samples, n_neighbors) */;
 let knn_dists: Array2<f32> = /* shape (n_samples, n_neighbors) */;
 
-// Precompute initialization (PCA, spectral, random, etc.)
+// Provide initialization (see Initialization section below)
+// Common choices: random, PCA, or your own custom embedding
 let init: Array2<f32> = /* shape (n_samples, n_components) */;
 
 // Fit UMAP to data
@@ -58,6 +59,38 @@ let embedding = model.embedding();  // Returns ArrayView2<f32>
 // Or take ownership of the embedding
 let embedding = model.into_embedding();  // Returns Array2<f32>
 ```
+
+## Initialization
+
+**You must provide your own initialization.** This library is designed to be minimal and focused on the core UMAP optimization - initialization is left to the caller.
+
+### Recommended Approaches
+
+**Random initialization** (simplest):
+```rust
+use rand::Rng;
+use ndarray::Array2;
+
+fn random_init(n_samples: usize, n_components: usize) -> Array2<f32> {
+    let mut rng = rand::thread_rng();
+    Array2::from_shape_fn((n_samples, n_components), |_| {
+        rng.gen_range(-10.0..10.0)
+    })
+}
+```
+
+**PCA initialization** (recommended for better convergence):
+```rust
+// Use any PCA library (e.g., linfa-reduction, ndarray-stats, etc.)
+// Project data to first n_components principal components
+// Scale to roughly [-10, 10] range
+```
+
+**Custom initialization**:
+- Spectral embedding (use sparse eigensolvers like arpack-ng for large datasets)
+- t-SNE initialization
+- Pre-trained neural network embeddings
+- Domain-specific embeddings
 
 ## Configuration
 

@@ -5,7 +5,7 @@ This example demonstrates UMAP dimensionality reduction on the MNIST handwritten
 ## Features
 
 - Automatic MNIST dataset download (first run only)
-- Three initialization methods: Random, PCA, and Spectral
+- Two initialization methods: Random and PCA
 - K-nearest neighbors computation (brute-force)
 - PNG scatter plot output with digit labels color-coded
 
@@ -21,7 +21,7 @@ On first run, the MNIST dataset will be automatically downloaded to the `data/` 
 
 ### Options
 
-- `--init <METHOD>` - Initialization method: `random`, `pca`, or `spectral` (default: `spectral`)
+- `--init <METHOD>` - Initialization method: `random` or `pca` (default: `random`)
 - `--samples <N>` - Number of samples to use, max 60000 (default: `60000`)
 - `--output <PATH>` - Output PNG file path (default: `mnist_umap.png`)
 - `--epochs <N>` - Number of optimization epochs (default: auto-determined based on dataset size)
@@ -31,8 +31,12 @@ On first run, the MNIST dataset will be automatically downloaded to the `data/` 
 ### Initialization Methods
 
 1. **Random**: Uniform distribution in [-10, 10]
+   - Simplest approach, always works
+   - Good baseline for comparison
+
 2. **PCA**: Project data onto top 2 principal components
-3. **Spectral**: Graph Laplacian eigenvectors of the k-NN graph
+   - **Recommended** for better convergence
+   - Better starting point than random
 
 ### Visualization
 

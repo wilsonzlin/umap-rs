@@ -9,7 +9,7 @@ use ndarray::ArrayView1;
 use ndarray::ArrayView2;
 use ndarray::Axis;
 use ndarray_linalg::Eigh;
-use ndarray_linalg::UPLO;
+use ndarray_linalg::UPLO; // Used for PCA
 use plotters::prelude::*;
 use rand::Rng;
 use std::fs;
@@ -23,7 +23,7 @@ use umap::UmapConfig;
 #[command(name = "MNIST UMAP Demo")]
 struct Args {
   /// Initialization method
-  #[arg(short, long, default_value = "spectral")]
+  #[arg(short, long, default_value = "random")]
   init: InitMethod,
 
   /// Number of samples to use (max 60000)
@@ -43,7 +43,6 @@ struct Args {
 enum InitMethod {
   Random,
   Pca,
-  Spectral,
 }
 
 fn main() {
@@ -79,9 +78,6 @@ fn main() {
   let init = match args.init {
     InitMethod::Random => compute_random_init(data.shape()[0]),
     InitMethod::Pca => compute_pca_init(data.view()),
-    InitMethod::Spectral => {
-      compute_spectral_init(knn_indices.view(), knn_dists.view(), data.shape()[0])
-    }
   };
   println!(
     "  Initialization computed in {:.2}s",
@@ -286,76 +282,6 @@ fn compute_pca_init(data: ArrayView2<f32>) -> Array2<f32> {
   scale_to_range(&mut projection, -10.0, 10.0);
 
   projection
-}
-
-/// Spectral initialization: use graph Laplacian eigenvectors
-fn compute_spectral_init(
-  knn_indices: ArrayView2<u32>,
-  knn_dists: ArrayView2<f32>,
-  n_samples: usize,
-) -> Array2<f32> {
-  // Build adjacency matrix from KNN graph
-  // Use Gaussian kernel: w_ij = exp(-dist^2 / sigma^2)
-  let sigma: f32 = 1.0;
-
-  let mut adjacency = Array2::zeros((n_samples, n_samples));
-
-  for i in 0..n_samples {
-    for k in 0..knn_indices.shape()[1] {
-      let j = knn_indices[(i, k)] as usize;
-      let dist = knn_dists[(i, k)];
-      let weight = (-dist.powi(2) / (sigma.powi(2))).exp();
-      adjacency[(i, j)] = weight;
-      adjacency[(j, i)] = weight; // Symmetrize
-    }
-  }
-
-  // Compute degree matrix
-  let degrees = adjacency.sum_axis(Axis(1));
-
-  // Compute normalized Laplacian: L = I - D^(-1/2) * A * D^(-1/2)
-  let mut laplacian = Array2::zeros((n_samples, n_samples));
-
-  for i in 0..n_samples {
-    for j in 0..n_samples {
-      if i == j {
-        laplacian[(i, j)] = 1.0;
-      } else {
-        let d_i_sqrt = degrees[i].sqrt();
-        let d_j_sqrt = degrees[j].sqrt();
-        if d_i_sqrt > 0.0 && d_j_sqrt > 0.0 {
-          laplacian[(i, j)] = -adjacency[(i, j)] / (d_i_sqrt * d_j_sqrt);
-        }
-      }
-    }
-  }
-
-  // Eigendecomposition of Laplacian (symmetric matrix, use eigh)
-  let (eigenvalues, eigenvectors) = laplacian.eigh(UPLO::Upper).unwrap();
-
-  // Sort by eigenvalues (ascending) and take the 2nd and 3rd smallest (skip the first, which is ~0)
-  let mut eigen_pairs: Vec<(f32, Array1<f32>)> = eigenvalues
-    .iter()
-    .zip(eigenvectors.axis_iter(Axis(1)))
-    .map(|(val, vec)| (*val, vec.to_owned()))
-    .collect();
-
-  eigen_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-  // Use eigenvectors 1 and 2 (skip eigenvector 0 which corresponds to eigenvalue ~0)
-  let ev1 = &eigen_pairs[1].1;
-  let ev2 = &eigen_pairs[2].1;
-
-  let mut embedding = Array2::zeros((n_samples, 2));
-  for i in 0..n_samples {
-    embedding[(i, 0)] = ev1[i];
-    embedding[(i, 1)] = ev2[i];
-  }
-
-  // Scale to reasonable range
-  scale_to_range(&mut embedding, -10.0, 10.0);
-
-  embedding
 }
 
 /// Scale array to specified range
