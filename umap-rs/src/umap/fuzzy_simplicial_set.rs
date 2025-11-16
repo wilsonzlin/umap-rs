@@ -139,7 +139,7 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
       }
 
       // Add (1 - 2*set_op_mix_ratio) * prod_matrix
-      let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio + set_op_mix_ratio;
+      let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
       for (val, (row, col)) in prod_matrix.iter() {
         tri.add_triplet(row, col, prod_coeff * val);
       }

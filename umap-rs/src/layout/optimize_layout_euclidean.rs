@@ -174,8 +174,9 @@ impl<'a> OptimizeLayoutEuclidean<'a> {
     let mut epoch_of_next_negative_sample = epochs_per_negative_sample.clone();
     let mut epoch_of_next_sample = epochs_per_sample.to_owned();
 
+    let mut alpha = initial_alpha;
+
     for n in 0..n_epochs {
-      let alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));
 
       if parallel {
         optimize_layout_euclidean_single_epoch_parallel(
@@ -216,6 +217,8 @@ impl<'a> OptimizeLayoutEuclidean<'a> {
           n,
         );
       }
+
+      alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));
     }
   }
 }
