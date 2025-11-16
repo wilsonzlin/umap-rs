@@ -252,6 +252,13 @@ let (eigenvalues, eigenvectors) = laplacian.eigh(UPLO::Upper).unwrap();
 
 **Note**: The spectral init is in example code only, not in the core library. For production, users would provide their own initialization.
 
+**UPDATE**: Spectral initialization issues have been addressed via "Tier 3" approach:
+- Clear runtime warnings when spectral init is used
+- Extensive documentation in code marking it as "TOY IMPLEMENTATION"
+- README updated to emphasize user-provided initialization
+- Recommended approaches documented (random, PCA, custom)
+- This aligns with the library's minimal, focused design philosophy
+
 ---
 
 ### 4. 🟡 MODERATE ISSUE: find_ab_params Optimization Method

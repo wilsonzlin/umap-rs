@@ -23,7 +23,7 @@ use umap::UmapConfig;
 #[command(name = "MNIST UMAP Demo")]
 struct Args {
   /// Initialization method
-  #[arg(short, long, default_value = "spectral")]
+  #[arg(short, long, default_value = "random")]
   init: InitMethod,
 
   /// Number of samples to use (max 60000)
@@ -75,6 +75,14 @@ fn main() {
 
   // Compute initialization
   println!("Computing {:?} initialization...", args.init);
+  if matches!(args.init, InitMethod::Spectral) {
+    println!("  WARNING: Spectral init is a TOY IMPLEMENTATION for demo purposes.");
+    println!("           - Uses dense eigendecomposition (O(n³), impractical for >5k samples)");
+    println!("           - Rebuilds graph instead of using fuzzy simplicial set");
+    println!("           - No error handling (will panic on failure)");
+    println!("           For production, provide your own initialization (PCA, random, etc.)");
+    println!();
+  }
   let start = Instant::now();
   let init = match args.init {
     InitMethod::Random => compute_random_init(data.shape()[0]),
@@ -288,13 +296,42 @@ fn compute_pca_init(data: ArrayView2<f32>) -> Array2<f32> {
   projection
 }
 
-/// Spectral initialization: use graph Laplacian eigenvectors
+/// **TOY IMPLEMENTATION** of spectral initialization for demonstration purposes.
+///
+/// # WARNING: NOT PRODUCTION-READY
+///
+/// This is a simplified spectral initialization that has significant limitations:
+///
+/// ## Critical Issues:
+/// 1. **O(n³) complexity** - Uses dense eigendecomposition, which is:
+///    - Impractical for datasets with >5,000 samples
+///    - Python UMAP uses sparse eigensolvers (ARPACK) that scale to millions of points
+///    - Computes ALL eigenvectors instead of just the k+1 needed
+///
+/// 2. **Wrong graph** - Rebuilds adjacency matrix using a fixed Gaussian kernel (σ=1.0)
+///    - Python UMAP uses the actual fuzzy simplicial set graph
+///    - This defeats the purpose of using UMAP's manifold structure
+///
+/// 3. **No error handling** - Will panic if eigendecomposition fails
+///    - Python UMAP gracefully falls back to random initialization
+///
+/// 4. **No sparse matrix support** - Converts to dense matrix
+///    - Wastes memory for sparse graphs
+///
+/// ## For Production Use:
+/// - **Recommended**: Use PCA or random initialization (see other examples)
+/// - **Alternative**: Provide your own spectral embedding using a proper sparse eigensolver
+/// - **Advanced**: Use `arpack-ng` crate for ARPACK bindings (same as scipy.sparse.linalg.eigsh)
+///
+/// This implementation exists solely to demonstrate the concept for small datasets like MNIST.
 fn compute_spectral_init(
   knn_indices: ArrayView2<u32>,
   knn_dists: ArrayView2<f32>,
   n_samples: usize,
 ) -> Array2<f32> {
   // Build adjacency matrix from KNN graph
+  // NOTE: This uses a simple Gaussian kernel instead of the fuzzy simplicial set
+  // that UMAP actually computes. This is incorrect but sufficient for demos.
   // Use Gaussian kernel: w_ij = exp(-dist^2 / sigma^2)
   let sigma: f32 = 1.0;
 
