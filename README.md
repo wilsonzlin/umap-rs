@@ -92,8 +92,6 @@ fn random_init(n_samples: usize, n_components: usize) -> Array2<f32> {
 - Pre-trained neural network embeddings
 - Domain-specific embeddings
 
-**Note:** The MNIST example includes a toy spectral implementation, but it's **not suitable for production** use (O(n³) complexity, only works on small datasets). See the example code documentation for details.
-
 ## Configuration
 
 UMAP parameters are grouped logically:

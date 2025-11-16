@@ -250,14 +250,15 @@ let (eigenvalues, eigenvectors) = laplacian.eigh(UPLO::Upper).unwrap();
 4. Add fallback to random initialization on error
 5. Match Python's scaling behavior [0, 10]
 
-**Note**: The spectral init is in example code only, not in the core library. For production, users would provide their own initialization.
+**Note**: The spectral init was in example code only, not in the core library.
 
-**UPDATE**: Spectral initialization issues have been addressed via "Tier 3" approach:
-- Clear runtime warnings when spectral init is used
-- Extensive documentation in code marking it as "TOY IMPLEMENTATION"
+**UPDATE**: Spectral initialization has been **completely removed** from the codebase:
+- Spectral init removed from mnist_demo example
+- Only Random and PCA initialization remain in examples
 - README updated to emphasize user-provided initialization
-- Recommended approaches documented (random, PCA, custom)
+- Recommended approaches documented (random, PCA, custom with arpack-ng)
 - This aligns with the library's minimal, focused design philosophy
+- Cleaner than keeping broken/toy code with warnings
 
 ---
 
