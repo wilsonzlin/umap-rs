@@ -15,18 +15,24 @@ impl Metric for EuclideanMetric {
   /// Returns (distance, gradient) where gradient = (x - y) / (distance + ε)
   /// The epsilon term prevents division by zero when points are identical.
   fn distance(&self, x: ArrayView1<f32>, y: ArrayView1<f32>) -> (f32, Array1<f32>) {
-    let mut sum_sq = 0.0;
-    for i in 0..x.len() {
-      let diff = x[i] - y[i];
-      sum_sq += diff * diff;
-    }
+    // OPTIMIZATION: Compute sum_sq with iterator for SIMD
+    let sum_sq: f32 = x
+      .iter()
+      .zip(y.iter())
+      .map(|(a, b)| {
+        let diff = a - b;
+        diff * diff
+      })
+      .sum();
     let dist = sum_sq.sqrt();
 
-    let mut grad = Array1::zeros(x.len());
+    // OPTIMIZATION: Compute gradient with map for better vectorization
     let denom = dist + 1e-6;
-    for i in 0..x.len() {
-      grad[i] = (x[i] - y[i]) / denom;
-    }
+    let grad = x
+      .iter()
+      .zip(y.iter())
+      .map(|(a, b)| (a - b) / denom)
+      .collect();
 
     (dist, grad)
   }
@@ -46,12 +52,15 @@ impl Metric for EuclideanMetric {
 
 /// Squared Euclidean distance (rdist) - used in euclidean optimization for speed
 /// This avoids the sqrt operation
-#[inline]
+/// OPTIMIZATION: Inline always and use iterator for better auto-vectorization
+#[inline(always)]
 pub fn rdist(x: &ArrayView1<f32>, y: &ArrayView1<f32>) -> f32 {
-  let mut sum_sq = 0.0;
-  for i in 0..x.len() {
-    let diff = x[i] - y[i];
-    sum_sq += diff * diff;
-  }
-  sum_sq
+  // Using iterator allows better SIMD auto-vectorization
+  x.iter()
+    .zip(y.iter())
+    .map(|(a, b)| {
+      let diff = a - b;
+      diff * diff
+    })
+    .sum()
 }

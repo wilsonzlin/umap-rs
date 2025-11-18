@@ -2,6 +2,7 @@ use dashmap::DashSet;
 use ndarray::Array1;
 use ndarray::ArrayView1;
 use ndarray::ArrayView2;
+use rayon::prelude::*;
 use typed_builder::TypedBuilder;
 
 /*
@@ -71,31 +72,43 @@ impl<'a, 's, 'r, 'd> ComputeMembershipStrengths<'a, 's, 'r, 'd> {
     let n_samples = knn_indices.shape()[0];
     let n_neighbors = knn_indices.shape()[1];
 
-    let mut rows = Array1::<u32>::zeros(knn_indices.len());
-    let mut cols = Array1::<u32>::zeros(knn_indices.len());
-    let mut vals = Array1::<f32>::zeros(knn_indices.len());
+    // OPTIMIZATION: Parallelize by computing each row's worth of data in parallel
+    let results: Vec<_> = (0..n_samples)
+      .into_par_iter()
+      .flat_map(|i| {
+        (0..n_neighbors)
+          .filter_map(|j| {
+            if knn_disconnections.contains(&(i, j)) {
+              return None;
+            }
 
-    for i in 0..n_samples {
-      for j in 0..n_neighbors {
-        if knn_disconnections.contains(&(i, j)) {
-          continue; // We didn't get the full knn for i
-        };
-        // If applied to an adjacency matrix points shouldn't be similar to themselves.
-        // If applied to an incidence matrix (or bipartite) then the row and column indices are different.
-        let val = if !bipartite && knn_indices[(i, j)] == i as u32 {
-          0.0
-        } else if knn_dists[(i, j)] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
-          1.0
-        } else {
-          f32::exp(-((knn_dists[(i, j)] - rhos[i]) / (sigmas[i])))
-        };
+            let knn_idx = knn_indices[(i, j)];
 
-        rows[i * n_neighbors + j] = i as u32;
-        cols[i * n_neighbors + j] = knn_indices[(i, j)];
-        vals[i * n_neighbors + j] = val;
-      }
-    }
+            // If applied to an adjacency matrix points shouldn't be similar to themselves.
+            // If applied to an incidence matrix (or bipartite) then the row and column indices are different.
+            let val = if !bipartite && knn_idx == i as u32 {
+              0.0
+            } else if knn_dists[(i, j)] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
+              1.0
+            } else {
+              // OPTIMIZATION: Compute exp directly
+              f32::exp(-(knn_dists[(i, j)] - rhos[i]) / sigmas[i])
+            };
 
-    (rows, cols, vals)
+            Some((i as u32, knn_idx, val))
+          })
+          .collect::<Vec<_>>()
+      })
+      .collect();
+
+    // Unzip into separate arrays
+    let (rows, cols_vals): (Vec<_>, Vec<_>) = results.iter().map(|(r, c, v)| (*r, (*c, *v))).unzip();
+    let (cols, vals): (Vec<_>, Vec<_>) = cols_vals.into_iter().unzip();
+
+    (
+      Array1::from(rows),
+      Array1::from(cols),
+      Array1::from(vals),
+    )
   }
 }

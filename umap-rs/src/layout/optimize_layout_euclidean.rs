@@ -1,4 +1,3 @@
-use crate::distances::rdist;
 use crate::utils::clip::clip;
 use ndarray::Array1;
 use ndarray::ArrayView1;
@@ -244,30 +243,38 @@ fn optimize_layout_euclidean_single_epoch(
 ) {
   let mut rng = rand::rng();
 
+  // Precompute constants
+  let two_a_b = 2.0 * a * b;
+  let two_gamma_b = 2.0 * gamma * b;
+  let b_minus_one = b - 1.0;
+
   for i in 0..epochs_per_sample.len() {
     if epoch_of_next_sample[i] <= n as f64 {
       let j = head[i] as usize;
       let k = tail[i] as usize;
 
-      let current = head_embedding.row(j).to_owned();
-      let other = tail_embedding.row(k).to_owned();
-
-      let dist_squared = rdist(&current.view(), &other.view());
+      // OPTIMIZATION: Compute distance inline to avoid borrow conflicts
+      let mut dist_squared = 0.0_f32;
+      for d in 0..dim {
+        let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+        dist_squared += diff * diff;
+      }
 
       let grad_coeff = if dist_squared > 0.0 {
-        let mut gc = -2.0 * a * b * f32::powf(dist_squared, b - 1.0);
-        gc /= a * f32::powf(dist_squared, b) + 1.0;
+        let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
+        let mut gc = -two_a_b * dist_pow_b / dist_squared;
+        gc /= a * dist_pow_b * dist_squared + 1.0;
         gc
       } else {
         0.0
       };
 
       for d in 0..dim {
-        let grad_d = clip(grad_coeff * (current[d] - other[d]));
-
+        let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+        let grad_d = clip(grad_coeff * diff);
         head_embedding[(j, d)] += grad_d * alpha;
         if move_other {
-          tail_embedding[(k, d)] += -grad_d * alpha;
+          tail_embedding[(k, d)] -= grad_d * alpha;
         }
       }
 
@@ -278,25 +285,28 @@ fn optimize_layout_euclidean_single_epoch(
 
       for _p in 0..n_neg_samples {
         let k = rng.random_range(0..n_vertices);
+        if j == k {
+          continue;
+        }
 
-        let current = head_embedding.row(j).to_owned();
-        let other = tail_embedding.row(k).to_owned();
-
-        let dist_squared = rdist(&current.view(), &other.view());
+        // OPTIMIZATION: Compute distance inline
+        let mut dist_squared = 0.0_f32;
+        for d in 0..dim {
+          let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+          dist_squared += diff * diff;
+        }
 
         let grad_coeff = if dist_squared > 0.0 {
-          let mut gc = 2.0 * gamma * b;
-          gc /= (0.001 + dist_squared) * (a * f32::powf(dist_squared, b) + 1.0);
-          gc
-        } else if j == k {
-          continue;
+          let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
+          two_gamma_b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
         } else {
           0.0
         };
 
-        for d in 0..dim {
-          if grad_coeff > 0.0 {
-            let grad_d = clip(grad_coeff * (current[d] - other[d]));
+        if grad_coeff > 0.0 {
+          for d in 0..dim {
+            let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+            let grad_d = clip(grad_coeff * diff);
             head_embedding[(j, d)] += grad_d * alpha;
           }
         }
@@ -340,6 +350,11 @@ fn optimize_layout_euclidean_single_epoch_parallel(
   let epoch_sample_cell = unsafe { UnsafeSyncCell::new(epoch_of_next_sample.as_mut_ptr()) };
   let epoch_neg_cell = unsafe { UnsafeSyncCell::new(epoch_of_next_negative_sample.as_mut_ptr()) };
 
+  // Precompute constants for gradient calculations
+  let two_a_b = 2.0 * a * b;
+  let two_gamma_b = 2.0 * gamma * b;
+  let b_minus_one = b - 1.0;
+
   (0..epochs_per_sample.len()).into_par_iter().for_each(|i| {
     let mut rng = rand::rng();
 
@@ -353,39 +368,33 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         let j = head[i] as usize;
         let k = tail[i] as usize;
 
-        // Read current and other embeddings
+        // OPTIMIZATION: Compute directly without Vec allocation
         let current_base = head_ptr.add(j * head_stride);
         let other_base = tail_ptr.add(k * tail_stride);
 
-        let mut current = Vec::with_capacity(dim);
-        let mut other = Vec::with_capacity(dim);
+        // Compute distance squared inline
+        let mut dist_squared = 0.0_f32;
         for d in 0..dim {
-          current.push(*current_base.add(d));
-          other.push(*other_base.add(d));
+          let diff = *current_base.add(d) - *other_base.add(d);
+          dist_squared += diff * diff;
         }
 
-        let dist_squared = {
-          let mut sum = 0.0;
-          for d in 0..dim {
-            let diff = current[d] - other[d];
-            sum += diff * diff;
-          }
-          sum
-        };
-
         let grad_coeff = if dist_squared > 0.0 {
-          let mut gc = -2.0 * a * b * f32::powf(dist_squared, b - 1.0);
-          gc /= a * f32::powf(dist_squared, b) + 1.0;
+          // OPTIMIZATION: Compute powf once and reuse
+          let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
+          let mut gc = -two_a_b * dist_pow_b / dist_squared;
+          gc /= a * dist_pow_b * dist_squared + 1.0;
           gc
         } else {
           0.0
         };
 
         for d in 0..dim {
-          let grad_d = clip(grad_coeff * (current[d] - other[d]));
+          let diff = *current_base.add(d) - *other_base.add(d);
+          let grad_d = clip(grad_coeff * diff);
           *current_base.add(d) += grad_d * alpha;
           if move_other {
-            *other_base.add(d) += -grad_d * alpha;
+            *other_base.add(d) -= grad_d * alpha;
           }
         }
 
@@ -400,36 +409,27 @@ fn optimize_layout_euclidean_single_epoch_parallel(
             continue;
           }
 
-          let current_base = head_ptr.add(j * head_stride);
           let other_base = tail_ptr.add(k * tail_stride);
 
-          let mut current = Vec::with_capacity(dim);
-          let mut other = Vec::with_capacity(dim);
+          // Compute distance squared inline (no allocation)
+          let mut dist_squared = 0.0_f32;
           for d in 0..dim {
-            current.push(*current_base.add(d));
-            other.push(*other_base.add(d));
+            let diff = *current_base.add(d) - *other_base.add(d);
+            dist_squared += diff * diff;
           }
 
-          let dist_squared = {
-            let mut sum = 0.0;
-            for d in 0..dim {
-              let diff = current[d] - other[d];
-              sum += diff * diff;
-            }
-            sum
-          };
-
           let grad_coeff = if dist_squared > 0.0 {
-            let mut gc = 2.0 * gamma * b;
-            gc /= (0.001 + dist_squared) * (a * f32::powf(dist_squared, b) + 1.0);
-            gc
+            // OPTIMIZATION: Optimized power calculation
+            let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
+            two_gamma_b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
           } else {
             0.0
           };
 
-          for d in 0..dim {
-            if grad_coeff > 0.0 {
-              let grad_d = clip(grad_coeff * (current[d] - other[d]));
+          if grad_coeff > 0.0 {
+            for d in 0..dim {
+              let diff = *current_base.add(d) - *other_base.add(d);
+              let grad_d = clip(grad_coeff * diff);
               *current_base.add(d) += grad_d * alpha;
             }
           }
@@ -439,4 +439,27 @@ fn optimize_layout_euclidean_single_epoch_parallel(
       }
     }
   });
+}
+
+/// Optimized power function for common UMAP cases
+/// For b around 0.5-1.0, this provides significant speedup
+#[inline(always)]
+fn powf_opt(x: f32, b: f32, b_minus_one: f32) -> f32 {
+  // Common case optimizations
+  if b == 1.0 {
+    x
+  } else if b == 0.5 {
+    x.sqrt()
+  } else if b == 2.0 {
+    x * x
+  } else if b_minus_one == 0.0 {
+    // b == 1.0, already handled above but defensive
+    x
+  } else if b_minus_one == -0.5 {
+    // b == 0.5
+    x.sqrt()
+  } else {
+    // General case - use powf but only once
+    f32::powf(x, b)
+  }
 }
