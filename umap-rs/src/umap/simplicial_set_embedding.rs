@@ -54,13 +54,12 @@ impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
     let n_epochs_max = n_epochs;
 
     // Find max value in graph
-    // OPTIMIZATION: Use fold for better performance
     let max_val = graph
       .data()
       .iter()
       .copied()
-      .fold(f32::NEG_INFINITY, f32::max)
-      .max(1.0);
+      .max_by(|a, b| a.partial_cmp(b).unwrap())
+      .unwrap_or(1.0);
 
     // Filter weak edges
     let threshold = if n_epochs_max > 10 {
@@ -101,23 +100,23 @@ impl<'g, 'i, 'o> SimplicialSetEmbedding<'g, 'i, 'o> {
     let tail_array = ndarray::Array1::from(tail);
 
     // Normalize embedding to be in range [0, 10]
-    // OPTIMIZATION: Use fold for more efficient min/max finding
     for col in 0..embedding.shape()[1] {
       let col_view = embedding.column(col);
-
-      // Find min and max in a single pass
-      let (min, max) = col_view
+      let min = col_view
         .iter()
         .copied()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), val| {
-          (min.min(val), max.max(val))
-        });
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(0.0);
+      let max = col_view
+        .iter()
+        .copied()
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(1.0);
 
       let range = max - min;
       if range > 0.0 {
-        let scale = 10.0 / range;
         for row in 0..embedding.shape()[0] {
-          embedding[(row, col)] = (embedding[(row, col)] - min) * scale;
+          embedding[(row, col)] = 10.0 * (embedding[(row, col)] - min) / range;
         }
       }
     }

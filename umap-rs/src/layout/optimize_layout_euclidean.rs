@@ -243,17 +243,12 @@ fn optimize_layout_euclidean_single_epoch(
 ) {
   let mut rng = rand::rng();
 
-  // Precompute constants
-  let two_a_b = 2.0 * a * b;
-  let two_gamma_b = 2.0 * gamma * b;
-  let b_minus_one = b - 1.0;
-
   for i in 0..epochs_per_sample.len() {
     if epoch_of_next_sample[i] <= n as f64 {
       let j = head[i] as usize;
       let k = tail[i] as usize;
 
-      // OPTIMIZATION: Compute distance inline to avoid borrow conflicts
+      // Compute distance inline to avoid borrow conflicts
       let mut dist_squared = 0.0_f32;
       for d in 0..dim {
         let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
@@ -261,8 +256,9 @@ fn optimize_layout_euclidean_single_epoch(
       }
 
       let grad_coeff = if dist_squared > 0.0 {
-        let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
-        let mut gc = -two_a_b * dist_pow_b / dist_squared;
+        // OPTIMIZATION: Compute dist^b once instead of calling powf twice
+        let dist_pow_b = f32::powf(dist_squared, b);
+        let mut gc = -2.0 * a * b * dist_pow_b / dist_squared;
         gc /= a * dist_pow_b * dist_squared + 1.0;
         gc
       } else {
@@ -289,7 +285,7 @@ fn optimize_layout_euclidean_single_epoch(
           continue;
         }
 
-        // OPTIMIZATION: Compute distance inline
+        // Compute distance inline
         let mut dist_squared = 0.0_f32;
         for d in 0..dim {
           let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
@@ -297,8 +293,9 @@ fn optimize_layout_euclidean_single_epoch(
         }
 
         let grad_coeff = if dist_squared > 0.0 {
-          let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
-          two_gamma_b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
+          // OPTIMIZATION: Compute dist^b once instead of calling powf twice
+          let dist_pow_b = f32::powf(dist_squared, b);
+          2.0 * gamma * b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
         } else {
           0.0
         };
@@ -350,11 +347,6 @@ fn optimize_layout_euclidean_single_epoch_parallel(
   let epoch_sample_cell = unsafe { UnsafeSyncCell::new(epoch_of_next_sample.as_mut_ptr()) };
   let epoch_neg_cell = unsafe { UnsafeSyncCell::new(epoch_of_next_negative_sample.as_mut_ptr()) };
 
-  // Precompute constants for gradient calculations
-  let two_a_b = 2.0 * a * b;
-  let two_gamma_b = 2.0 * gamma * b;
-  let b_minus_one = b - 1.0;
-
   (0..epochs_per_sample.len()).into_par_iter().for_each(|i| {
     let mut rng = rand::rng();
 
@@ -372,7 +364,7 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         let current_base = head_ptr.add(j * head_stride);
         let other_base = tail_ptr.add(k * tail_stride);
 
-        // Compute distance squared inline
+        // Compute distance squared inline (no allocation)
         let mut dist_squared = 0.0_f32;
         for d in 0..dim {
           let diff = *current_base.add(d) - *other_base.add(d);
@@ -380,9 +372,9 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         }
 
         let grad_coeff = if dist_squared > 0.0 {
-          // OPTIMIZATION: Compute powf once and reuse
-          let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
-          let mut gc = -two_a_b * dist_pow_b / dist_squared;
+          // OPTIMIZATION: Compute dist^b once instead of calling powf twice
+          let dist_pow_b = f32::powf(dist_squared, b);
+          let mut gc = -2.0 * a * b * dist_pow_b / dist_squared;
           gc /= a * dist_pow_b * dist_squared + 1.0;
           gc
         } else {
@@ -419,9 +411,9 @@ fn optimize_layout_euclidean_single_epoch_parallel(
           }
 
           let grad_coeff = if dist_squared > 0.0 {
-            // OPTIMIZATION: Optimized power calculation
-            let dist_pow_b = powf_opt(dist_squared, b, b_minus_one);
-            two_gamma_b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
+            // OPTIMIZATION: Compute dist^b once instead of calling powf twice
+            let dist_pow_b = f32::powf(dist_squared, b);
+            2.0 * gamma * b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
           } else {
             0.0
           };
@@ -439,27 +431,4 @@ fn optimize_layout_euclidean_single_epoch_parallel(
       }
     }
   });
-}
-
-/// Optimized power function for common UMAP cases
-/// For b around 0.5-1.0, this provides significant speedup
-#[inline(always)]
-fn powf_opt(x: f32, b: f32, b_minus_one: f32) -> f32 {
-  // Common case optimizations
-  if b == 1.0 {
-    x
-  } else if b == 0.5 {
-    x.sqrt()
-  } else if b == 2.0 {
-    x * x
-  } else if b_minus_one == 0.0 {
-    // b == 1.0, already handled above but defensive
-    x
-  } else if b_minus_one == -0.5 {
-    // b == 0.5
-    x.sqrt()
-  } else {
-    // General case - use powf but only once
-    f32::powf(x, b)
-  }
 }
