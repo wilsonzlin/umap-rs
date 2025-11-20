@@ -10,7 +10,6 @@
   -------
   The clamped value, now fixed to be in the range -4.0 to 4.0.
 */
-#[inline]
 pub fn clip(val: f32) -> f32 {
   val.clamp(-4.0, 4.0)
 }
