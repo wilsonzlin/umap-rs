@@ -1,4 +1,3 @@
-use crate::distances::rdist;
 use crate::utils::clip::clip;
 use ndarray::Array1;
 use ndarray::ArrayView1;
@@ -249,25 +248,27 @@ fn optimize_layout_euclidean_single_epoch(
       let j = head[i] as usize;
       let k = tail[i] as usize;
 
-      let current = head_embedding.row(j).to_owned();
-      let other = tail_embedding.row(k).to_owned();
-
-      let dist_squared = rdist(&current.view(), &other.view());
+      let mut dist_squared = 0.0_f32;
+      for d in 0..dim {
+        let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+        dist_squared += diff * diff;
+      }
 
       let grad_coeff = if dist_squared > 0.0 {
-        let mut gc = -2.0 * a * b * f32::powf(dist_squared, b - 1.0);
-        gc /= a * f32::powf(dist_squared, b) + 1.0;
+        let dist_pow_b = f32::powf(dist_squared, b);
+        let mut gc = -2.0 * a * b * dist_pow_b / dist_squared;
+        gc /= a * dist_pow_b * dist_squared + 1.0;
         gc
       } else {
         0.0
       };
 
       for d in 0..dim {
-        let grad_d = clip(grad_coeff * (current[d] - other[d]));
-
+        let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+        let grad_d = clip(grad_coeff * diff);
         head_embedding[(j, d)] += grad_d * alpha;
         if move_other {
-          tail_embedding[(k, d)] += -grad_d * alpha;
+          tail_embedding[(k, d)] -= grad_d * alpha;
         }
       }
 
@@ -278,25 +279,27 @@ fn optimize_layout_euclidean_single_epoch(
 
       for _p in 0..n_neg_samples {
         let k = rng.random_range(0..n_vertices);
+        if j == k {
+          continue;
+        }
 
-        let current = head_embedding.row(j).to_owned();
-        let other = tail_embedding.row(k).to_owned();
-
-        let dist_squared = rdist(&current.view(), &other.view());
+        let mut dist_squared = 0.0_f32;
+        for d in 0..dim {
+          let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+          dist_squared += diff * diff;
+        }
 
         let grad_coeff = if dist_squared > 0.0 {
-          let mut gc = 2.0 * gamma * b;
-          gc /= (0.001 + dist_squared) * (a * f32::powf(dist_squared, b) + 1.0);
-          gc
-        } else if j == k {
-          continue;
+          let dist_pow_b = f32::powf(dist_squared, b);
+          2.0 * gamma * b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
         } else {
           0.0
         };
 
-        for d in 0..dim {
-          if grad_coeff > 0.0 {
-            let grad_d = clip(grad_coeff * (current[d] - other[d]));
+        if grad_coeff > 0.0 {
+          for d in 0..dim {
+            let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
+            let grad_d = clip(grad_coeff * diff);
             head_embedding[(j, d)] += grad_d * alpha;
           }
         }
@@ -353,39 +356,30 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         let j = head[i] as usize;
         let k = tail[i] as usize;
 
-        // Read current and other embeddings
         let current_base = head_ptr.add(j * head_stride);
         let other_base = tail_ptr.add(k * tail_stride);
 
-        let mut current = Vec::with_capacity(dim);
-        let mut other = Vec::with_capacity(dim);
+        let mut dist_squared = 0.0_f32;
         for d in 0..dim {
-          current.push(*current_base.add(d));
-          other.push(*other_base.add(d));
+          let diff = *current_base.add(d) - *other_base.add(d);
+          dist_squared += diff * diff;
         }
 
-        let dist_squared = {
-          let mut sum = 0.0;
-          for d in 0..dim {
-            let diff = current[d] - other[d];
-            sum += diff * diff;
-          }
-          sum
-        };
-
         let grad_coeff = if dist_squared > 0.0 {
-          let mut gc = -2.0 * a * b * f32::powf(dist_squared, b - 1.0);
-          gc /= a * f32::powf(dist_squared, b) + 1.0;
+          let dist_pow_b = f32::powf(dist_squared, b);
+          let mut gc = -2.0 * a * b * dist_pow_b / dist_squared;
+          gc /= a * dist_pow_b * dist_squared + 1.0;
           gc
         } else {
           0.0
         };
 
         for d in 0..dim {
-          let grad_d = clip(grad_coeff * (current[d] - other[d]));
+          let diff = *current_base.add(d) - *other_base.add(d);
+          let grad_d = clip(grad_coeff * diff);
           *current_base.add(d) += grad_d * alpha;
           if move_other {
-            *other_base.add(d) += -grad_d * alpha;
+            *other_base.add(d) -= grad_d * alpha;
           }
         }
 
@@ -400,36 +394,25 @@ fn optimize_layout_euclidean_single_epoch_parallel(
             continue;
           }
 
-          let current_base = head_ptr.add(j * head_stride);
           let other_base = tail_ptr.add(k * tail_stride);
 
-          let mut current = Vec::with_capacity(dim);
-          let mut other = Vec::with_capacity(dim);
+          let mut dist_squared = 0.0_f32;
           for d in 0..dim {
-            current.push(*current_base.add(d));
-            other.push(*other_base.add(d));
+            let diff = *current_base.add(d) - *other_base.add(d);
+            dist_squared += diff * diff;
           }
 
-          let dist_squared = {
-            let mut sum = 0.0;
-            for d in 0..dim {
-              let diff = current[d] - other[d];
-              sum += diff * diff;
-            }
-            sum
-          };
-
           let grad_coeff = if dist_squared > 0.0 {
-            let mut gc = 2.0 * gamma * b;
-            gc /= (0.001 + dist_squared) * (a * f32::powf(dist_squared, b) + 1.0);
-            gc
+            let dist_pow_b = f32::powf(dist_squared, b);
+            2.0 * gamma * b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
           } else {
             0.0
           };
 
-          for d in 0..dim {
-            if grad_coeff > 0.0 {
-              let grad_d = clip(grad_coeff * (current[d] - other[d]));
+          if grad_coeff > 0.0 {
+            for d in 0..dim {
+              let diff = *current_base.add(d) - *other_base.add(d);
+              let grad_d = clip(grad_coeff * diff);
               *current_base.add(d) += grad_d * alpha;
             }
           }
