@@ -72,7 +72,6 @@ impl<'a, 's, 'r, 'd> ComputeMembershipStrengths<'a, 's, 'r, 'd> {
     let n_samples = knn_indices.shape()[0];
     let n_neighbors = knn_indices.shape()[1];
 
-    // OPTIMIZATION: Parallelize by computing each row's worth of data in parallel
     let results: Vec<_> = (0..n_samples)
       .into_par_iter()
       .flat_map(|i| {
@@ -91,7 +90,6 @@ impl<'a, 's, 'r, 'd> ComputeMembershipStrengths<'a, 's, 'r, 'd> {
             } else if knn_dists[(i, j)] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
               1.0
             } else {
-              // OPTIMIZATION: Compute exp directly
               f32::exp(-(knn_dists[(i, j)] - rhos[i]) / sigmas[i])
             };
 

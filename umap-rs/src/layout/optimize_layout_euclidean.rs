@@ -248,7 +248,6 @@ fn optimize_layout_euclidean_single_epoch(
       let j = head[i] as usize;
       let k = tail[i] as usize;
 
-      // Compute distance inline to avoid borrow conflicts
       let mut dist_squared = 0.0_f32;
       for d in 0..dim {
         let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
@@ -256,7 +255,6 @@ fn optimize_layout_euclidean_single_epoch(
       }
 
       let grad_coeff = if dist_squared > 0.0 {
-        // OPTIMIZATION: Compute dist^b once instead of calling powf twice
         let dist_pow_b = f32::powf(dist_squared, b);
         let mut gc = -2.0 * a * b * dist_pow_b / dist_squared;
         gc /= a * dist_pow_b * dist_squared + 1.0;
@@ -285,7 +283,6 @@ fn optimize_layout_euclidean_single_epoch(
           continue;
         }
 
-        // Compute distance inline
         let mut dist_squared = 0.0_f32;
         for d in 0..dim {
           let diff = head_embedding[(j, d)] - tail_embedding[(k, d)];
@@ -293,7 +290,6 @@ fn optimize_layout_euclidean_single_epoch(
         }
 
         let grad_coeff = if dist_squared > 0.0 {
-          // OPTIMIZATION: Compute dist^b once instead of calling powf twice
           let dist_pow_b = f32::powf(dist_squared, b);
           2.0 * gamma * b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
         } else {
@@ -360,11 +356,9 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         let j = head[i] as usize;
         let k = tail[i] as usize;
 
-        // OPTIMIZATION: Compute directly without Vec allocation
         let current_base = head_ptr.add(j * head_stride);
         let other_base = tail_ptr.add(k * tail_stride);
 
-        // Compute distance squared inline (no allocation)
         let mut dist_squared = 0.0_f32;
         for d in 0..dim {
           let diff = *current_base.add(d) - *other_base.add(d);
@@ -372,7 +366,6 @@ fn optimize_layout_euclidean_single_epoch_parallel(
         }
 
         let grad_coeff = if dist_squared > 0.0 {
-          // OPTIMIZATION: Compute dist^b once instead of calling powf twice
           let dist_pow_b = f32::powf(dist_squared, b);
           let mut gc = -2.0 * a * b * dist_pow_b / dist_squared;
           gc /= a * dist_pow_b * dist_squared + 1.0;
@@ -403,7 +396,6 @@ fn optimize_layout_euclidean_single_epoch_parallel(
 
           let other_base = tail_ptr.add(k * tail_stride);
 
-          // Compute distance squared inline (no allocation)
           let mut dist_squared = 0.0_f32;
           for d in 0..dim {
             let diff = *current_base.add(d) - *other_base.add(d);
@@ -411,7 +403,6 @@ fn optimize_layout_euclidean_single_epoch_parallel(
           }
 
           let grad_coeff = if dist_squared > 0.0 {
-            // OPTIMIZATION: Compute dist^b once instead of calling powf twice
             let dist_pow_b = f32::powf(dist_squared, b);
             2.0 * gamma * b / ((0.001 + dist_squared) * (a * dist_pow_b * dist_squared + 1.0))
           } else {
