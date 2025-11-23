@@ -16,8 +16,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
-use umap::Umap;
-use umap::UmapConfig;
+use umap_rs::Umap;
+use umap_rs::UmapConfig;
 
 #[derive(Parser)]
 #[command(name = "MNIST UMAP Demo")]
@@ -89,7 +89,7 @@ fn main() {
   println!("Running UMAP optimization...");
   let start = Instant::now();
   let config = UmapConfig {
-    optimization: umap::OptimizationParams {
+    optimization: umap_rs::OptimizationParams {
       n_epochs: args.epochs,
       ..Default::default()
     },
