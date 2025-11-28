@@ -117,7 +117,7 @@ edges.par_iter().for_each(|edge| {
 });
 ```
 
-**Result:** 4-8x speedup with negligible accuracy loss.
+**Result:** Multi-core speedup with negligible accuracy loss.
 
 ## Intuitive analogy
 

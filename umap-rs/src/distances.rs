@@ -1,4 +1,5 @@
 use crate::metric::Metric;
+use crate::metric::MetricType;
 use ndarray::Array1;
 use ndarray::ArrayView1;
 
@@ -10,6 +11,10 @@ use ndarray::ArrayView1;
 pub struct EuclideanMetric;
 
 impl Metric for EuclideanMetric {
+  fn metric_type(&self) -> MetricType {
+    MetricType::Euclidean
+  }
+
   /// Compute Euclidean distance and its gradient.
   ///
   /// Returns (distance, gradient) where gradient = (x - y) / (distance + ε)

@@ -1,41 +1,57 @@
 use crate::config::UmapConfig;
+use crate::distances::EuclideanMetric;
+use crate::manifold::LearnedManifold;
 use crate::metric::Metric;
+use crate::optimizer::Optimizer;
 use crate::umap::find_ab_params::find_ab_params;
 use crate::umap::fuzzy_simplicial_set::FuzzySimplicialSet;
 use crate::umap::raise_disconnected_warning::raise_disconnected_warning;
-use crate::umap::simplicial_set_embedding::SimplicialSetEmbedding;
 use dashmap::DashSet;
-use ndarray::Array1;
 use ndarray::Array2;
 use ndarray::ArrayView2;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
-use sprs::CsMat;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// UMAP dimensionality reduction algorithm.
 ///
 /// This struct holds the configuration and metrics for UMAP. It can be reused
-/// to fit multiple datasets with the same parameters.
+/// to learn manifolds from multiple datasets with the same parameters.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use umap::{Umap, UmapConfig};
-/// use umap::EuclideanMetric;
 /// use ndarray::Array2;
 ///
 /// let config = UmapConfig::default();
 /// let umap = Umap::new(config);
 ///
-/// // Assuming you have precomputed KNN and initialization
-/// let model = umap.fit(
+/// // Learn the manifold structure
+/// let manifold = umap.learn_manifold(
 ///     data.view(),
 ///     knn_indices.view(),
 ///     knn_dists.view(),
-///     init.view(),
 /// );
 ///
-/// let embedding = model.embedding();
+/// // Create an optimizer and run training
+/// let mut opt = Optimizer::new(
+///     manifold,
+///     init,
+///     500, // total epochs
+///     config.optimization.repulsion_strength,
+///     config.optimization.learning_rate,
+///     config.optimization.negative_sample_rate,
+///     &euclidean_metric,
+/// );
+///
+/// while opt.remaining_epochs() > 0 {
+///     opt.step_epochs(opt.remaining_epochs().min(10));
+/// }
+///
+/// let fitted = opt.into_fitted(config);
+/// let embedding = fitted.embedding();
 /// ```
 pub struct Umap {
   config: UmapConfig,
@@ -53,7 +69,6 @@ impl Umap {
   ///
   /// * `config` - UMAP configuration parameters
   pub fn new(config: UmapConfig) -> Self {
-    use crate::distances::EuclideanMetric;
     Self {
       config,
       metric: Box::new(EuclideanMetric),
@@ -90,25 +105,26 @@ impl Umap {
     }
   }
 
-  /// Fit UMAP to data, learning the manifold structure and computing embeddings.
+  /// Learn the manifold structure from high-dimensional data.
   ///
-  /// This method constructs a fuzzy topological representation of the input data
-  /// and optimizes a low-dimensional embedding that preserves the manifold structure.
+  /// This is the expensive graph construction phase that builds a fuzzy
+  /// topological representation of the data. The result can be cached,
+  /// serialized, and reused for multiple different optimizations.
+  ///
+  /// This phase is deterministic (no randomness) and independent of the
+  /// target embedding dimensionality.
   ///
   /// # Arguments
   ///
-  /// * `data` - Input data matrix (n_samples × n_features). Used for validation and
-  ///   future transform operations (not yet implemented).
+  /// * `data` - Input data matrix (n_samples × n_features). Used for validation.
   /// * `knn_indices` - Precomputed k-nearest neighbor indices (n_samples × n_neighbors).
   ///   Each row contains indices of the k nearest neighbors for that sample.
   /// * `knn_dists` - Precomputed k-nearest neighbor distances (n_samples × n_neighbors).
   ///   Each row contains distances to the k nearest neighbors.
-  /// * `init` - Initial embedding coordinates (n_samples × n_components).
-  ///   Typically from spectral embedding, PCA, or random initialization.
   ///
   /// # Returns
   ///
-  /// A `FittedUmap` containing the optimized embedding and learned manifold structure.
+  /// A `LearnedManifold` containing the fuzzy simplicial set and local geometry.
   ///
   /// # Panics
   ///
@@ -120,24 +136,24 @@ impl Umap {
   /// # Example
   ///
   /// ```ignore
-  /// let model = umap.fit(
+  /// let manifold = umap.learn_manifold(
   ///     data.view(),
   ///     knn_indices.view(),
   ///     knn_dists.view(),
-  ///     init.view(),
   /// );
+  /// // Save for later use
+  /// save_manifold(&manifold)?;
   /// ```
-  pub fn fit<'a>(
+  pub fn learn_manifold(
     &self,
-    data: ArrayView2<'a, f32>,
-    knn_indices: ArrayView2<'a, u32>,
-    knn_dists: ArrayView2<'a, f32>,
-    init: ArrayView2<'a, f32>,
-  ) -> FittedUmap {
+    data: ArrayView2<f32>,
+    knn_indices: ArrayView2<u32>,
+    knn_dists: ArrayView2<f32>,
+  ) -> LearnedManifold {
     let n_samples = data.shape()[0];
 
     // Validate parameters
-    self.validate_parameters(n_samples, &knn_indices, &knn_dists, &init);
+    self.validate_parameters(n_samples, &knn_indices, &knn_dists);
 
     // Determine a and b parameters
     let (a, b) =
@@ -196,46 +212,118 @@ impl Umap {
       0.1,
     );
 
-    // Compute the embedding via gradient descent
-    let embedding = SimplicialSetEmbedding::builder()
-      .graph(graph.view())
-      .initial_alpha(self.config.optimization.learning_rate)
-      .a(a)
-      .b(b)
-      .gamma(self.config.optimization.repulsion_strength)
-      .negative_sample_rate(self.config.optimization.negative_sample_rate)
-      .n_epochs(self.config.optimization.n_epochs)
-      .init(init)
-      .output_metric(self.output_metric.as_ref())
-      .build()
-      .exec();
+    LearnedManifold {
+      graph,
+      sigmas,
+      rhos,
+      n_vertices: n_samples,
+      a,
+      b,
+    }
+  }
 
-    // Set disconnected vertices to NaN in the embedding
-    let mut final_embedding = embedding;
-    for (i, row) in graph.outer_iterator().enumerate() {
+  /// High-level convenience method that learns and optimizes in one call.
+  ///
+  /// This is equivalent to:
+  /// 1. `learn_manifold()` - build the graph
+  /// 2. `Optimizer::new()` - set up optimization
+  /// 3. Run all epochs
+  /// 4. `into_fitted()` - extract final model
+  ///
+  /// For checkpointing or more control, use the lower-level API instead.
+  ///
+  /// # Arguments
+  ///
+  /// * `data` - Input data matrix (n_samples × n_features)
+  /// * `knn_indices` - Precomputed k-nearest neighbor indices
+  /// * `knn_dists` - Precomputed k-nearest neighbor distances
+  /// * `init` - Initial embedding coordinates (n_samples × n_components)
+  ///
+  /// # Returns
+  ///
+  /// A `FittedUmap` containing the optimized embedding and learned manifold.
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// let fitted = umap.fit(
+  ///     data.view(),
+  ///     knn_indices.view(),
+  ///     knn_dists.view(),
+  ///     init.view(),
+  /// );
+  /// let embedding = fitted.embedding();
+  /// ```
+  pub fn fit(
+    &self,
+    data: ArrayView2<f32>,
+    knn_indices: ArrayView2<u32>,
+    knn_dists: ArrayView2<f32>,
+    init: ArrayView2<f32>,
+  ) -> FittedUmap {
+    let n_samples = data.shape()[0];
+
+    // Validate init array
+    if init.shape()[1] != self.config.n_components {
+      panic!(
+        "init has {} components but n_components is {}",
+        init.shape()[1],
+        self.config.n_components
+      );
+    }
+
+    if init.shape()[0] != n_samples {
+      panic!(
+        "init has {} samples but data has {} samples",
+        init.shape()[0],
+        n_samples
+      );
+    }
+
+    // Learn the manifold
+    let manifold = self.learn_manifold(data, knn_indices, knn_dists);
+
+    // Determine total epochs
+    let total_epochs = self
+      .config
+      .optimization
+      .n_epochs
+      .unwrap_or_else(|| if n_samples <= 10000 { 500 } else { 200 });
+
+    // Create optimizer
+    let metric_type = self.output_metric.metric_type();
+    let mut optimizer = Optimizer::new(
+      manifold,
+      init.to_owned(),
+      total_epochs,
+      &self.config,
+      metric_type,
+    );
+
+    // Run all epochs
+    optimizer.step_epochs(total_epochs, self.output_metric.as_ref());
+
+    // Extract final model
+    let mut fitted = optimizer.into_fitted(self.config.clone());
+
+    // Set disconnected vertices to NaN
+    for (i, row) in fitted.manifold.graph.outer_iterator().enumerate() {
       let sum: f32 = row.data().iter().sum();
       if sum == 0.0 {
-        for j in 0..final_embedding.shape()[1] {
-          final_embedding[(i, j)] = f32::NAN;
+        for j in 0..fitted.embedding.shape()[1] {
+          fitted.embedding[(i, j)] = f32::NAN;
         }
       }
     }
 
-    FittedUmap {
-      embedding: final_embedding,
-      graph,
-      sigmas,
-      rhos,
-      config: self.config.clone(),
-    }
+    fitted
   }
 
-  fn validate_parameters<'a>(
+  fn validate_parameters(
     &self,
     n_samples: usize,
-    knn_indices: &ArrayView2<'a, u32>,
-    knn_dists: &ArrayView2<'a, f32>,
-    init: &ArrayView2<'a, f32>,
+    knn_indices: &ArrayView2<u32>,
+    knn_dists: &ArrayView2<f32>,
   ) {
     // Validate graph parameters
     if self.config.graph.set_op_mix_ratio < 0.0 || self.config.graph.set_op_mix_ratio > 1.0 {
@@ -314,22 +402,6 @@ impl Umap {
       );
     }
 
-    if init.shape()[1] != self.config.n_components {
-      panic!(
-        "init has {} components but n_components is {}",
-        init.shape()[1],
-        self.config.n_components
-      );
-    }
-
-    if init.shape()[0] != n_samples {
-      panic!(
-        "init has {} samples but data has {} samples",
-        init.shape()[0],
-        n_samples
-      );
-    }
-
     // Validate dataset size
     if n_samples <= self.config.graph.n_neighbors {
       panic!(
@@ -340,26 +412,17 @@ impl Umap {
   }
 }
 
-/// A fitted UMAP model containing the learned manifold structure and embeddings.
+/// A fitted UMAP model containing the learned manifold and embedding.
 ///
-/// This struct holds the results of fitting UMAP to data. It provides access to
-/// the computed embedding and will support transforming new data in the future.
+/// This is a lightweight struct that holds only the final results, without
+/// the heavy optimization state (epoch counters, preprocessed arrays, etc.).
 ///
-/// # Fields (all private)
-///
-/// The internal state is kept private to allow future changes without breaking
-/// the public API. Access the embedding via the provided methods.
+/// The manifold can be serialized and reused for future work like transform().
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedUmap {
-  embedding: Array2<f32>,
-  // Internal state kept for future transform() implementation
-  #[allow(dead_code)]
-  graph: CsMat<f32>,
-  #[allow(dead_code)]
-  sigmas: Array1<f32>,
-  #[allow(dead_code)]
-  rhos: Array1<f32>,
-  #[allow(dead_code)]
-  config: UmapConfig,
+  pub(crate) embedding: Array2<f32>,
+  pub(crate) manifold: LearnedManifold,
+  pub(crate) config: UmapConfig,
 }
 
 impl FittedUmap {
@@ -376,7 +439,7 @@ impl FittedUmap {
   /// # Example
   ///
   /// ```ignore
-  /// let embedding = model.embedding();
+  /// let embedding = fitted.embedding();
   /// println!("Embedding shape: {:?}", embedding.shape());
   /// ```
   pub fn embedding(&self) -> ArrayView2<'_, f32> {
@@ -395,11 +458,21 @@ impl FittedUmap {
   /// # Example
   ///
   /// ```ignore
-  /// let embedding = model.into_embedding();
-  /// // model is now consumed
+  /// let embedding = fitted.into_embedding();
+  /// // fitted is now consumed
   /// ```
   pub fn into_embedding(self) -> Array2<f32> {
     self.embedding
+  }
+
+  /// Get a reference to the learned manifold.
+  pub fn manifold(&self) -> &LearnedManifold {
+    &self.manifold
+  }
+
+  /// Get a reference to the configuration used for this fit.
+  pub fn config(&self) -> &UmapConfig {
+    &self.config
   }
 
   /// Transform new data points into the embedding space.
@@ -429,6 +502,6 @@ impl FittedUmap {
     new_knn_indices: ArrayView2<u32>,
     new_knn_dists: ArrayView2<f32>,
   ) -> Array2<f32> {
-    todo!("Transform not yet implemented - contributions welcome! See issue #XXX")
+    todo!("Transform not yet implemented - contributions welcome!")
   }
 }

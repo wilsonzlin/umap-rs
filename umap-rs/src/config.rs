@@ -1,8 +1,11 @@
+use serde::Deserialize;
+use serde::Serialize;
+
 /// Configuration for manifold shape and embedding space properties.
 ///
 /// These parameters control the geometric properties of the low-dimensional
 /// embedding space and how the manifold is shaped.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifoldParams {
   /// Minimum distance between points in the embedding space.
   ///
@@ -52,7 +55,7 @@ impl Default for ManifoldParams {
 ///
 /// These parameters control how the high-dimensional manifold structure
 /// is captured via a fuzzy topological representation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphParams {
   /// Number of nearest neighbors to use for manifold approximation.
   ///
@@ -108,7 +111,7 @@ impl Default for GraphParams {
 ///
 /// These parameters control the embedding optimization process via SGD
 /// on the fuzzy set cross-entropy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizationParams {
   /// Number of optimization epochs.
   ///
@@ -180,7 +183,7 @@ impl Default for OptimizationParams {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UmapConfig {
   /// Number of dimensions in the output embedding.
   ///

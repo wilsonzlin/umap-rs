@@ -2,12 +2,25 @@ use ndarray::Array1;
 use ndarray::ArrayView1;
 use std::fmt::Debug;
 
+/// Metric type determines which optimization path to use.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum MetricType {
+  /// Euclidean-like metrics with fast squared distance.
+  Euclidean,
+  /// Generic metrics requiring gradient computation.
+  Generic,
+}
+
 /// A distance metric for embedding spaces.
 ///
 /// Metrics must be able to compute both distances and their gradients for use
 /// in gradient descent optimization. Thread-safety (Send + Sync) is required
 /// for parallel optimization.
 pub trait Metric: Debug + Send + Sync {
+  /// Returns the type of this metric for optimization path selection.
+  fn metric_type(&self) -> MetricType {
+    MetricType::Generic
+  }
   /// Compute the distance between two points and its gradient.
   ///
   /// # Arguments
@@ -33,7 +46,7 @@ pub trait Metric: Debug + Send + Sync {
     f32::INFINITY
   }
 
-  /// Optional fast path for computing squared distance without square root.
+  /// Optional optimized computation of squared distance without square root.
   ///
   /// For Euclidean and related metrics, computing squared distance is faster
   /// than the full distance (avoids sqrt). Return `Some(dist_squared)` if

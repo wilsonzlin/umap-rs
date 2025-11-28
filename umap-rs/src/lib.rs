@@ -29,9 +29,8 @@
 //!
 //! # Features
 //!
-//! - **Parallel optimization**: 4-8x speedup via Rayon's parallel SGD (Hogwild! algorithm)
-//! - **Euclidean specialization**: Fast path for Euclidean metrics
-//! - **Generic metrics**: Extensible via the `Metric` trait
+//! - **Parallel optimization**: Rayon's parallel SGD (Hogwild! algorithm)
+//! - **Extensible metrics**: Custom distance functions via the `Metric` trait
 //! - **Zero-copy views**: Efficient array handling with `ndarray`
 //!
 //! # Limitations
@@ -62,7 +61,10 @@ pub use config::OptimizationParams;
 pub use config::UmapConfig;
 pub use embedding::FittedUmap;
 pub use embedding::Umap;
+pub use manifold::LearnedManifold;
 pub use metric::Metric;
+pub use metric::MetricType;
+pub use optimizer::Optimizer;
 
 // Internal modules (not exposed)
 mod distances;
@@ -71,5 +73,13 @@ mod layout;
 mod umap;
 mod utils;
 
+// Public modules (for advanced users)
+pub mod manifold;
+pub mod optimizer;
+
 // Re-export distances for convenience
 pub use distances::EuclideanMetric;
+
+// Tests
+#[cfg(test)]
+mod tests;

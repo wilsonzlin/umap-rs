@@ -4,7 +4,6 @@ use ndarray::ArrayView1;
 use ndarray::ArrayViewMut2;
 use rand::Rng;
 use rayon::prelude::*;
-use typed_builder::TypedBuilder;
 
 /// Wrapper to allow concurrent mutable access to embedding arrays in parallel SGD.
 ///
@@ -19,7 +18,7 @@ use typed_builder::TypedBuilder;
 /// 2. **Races are rare** - In typical graphs, most edges don't share vertices in the same
 ///    parallel batch, so conflicts are infrequent.
 ///
-/// 3. **Performance is critical** - The speedup from parallelism (4-8x) vastly outweighs
+/// 3. **Performance is critical** - The speedup from parallelism vastly outweighs
 ///    the negligible impact of rare lost updates.
 ///
 /// 4. **Matches reference implementation** - Python UMAP with Numba uses `parallel=True`
@@ -58,167 +57,90 @@ impl<T> UnsafeSyncCell<T> {
   }
 }
 
-/*
-  Improve an embedding using stochastic gradient descent to minimize the
-  fuzzy set cross entropy between the 1-skeletons of the high dimensional
-  and low dimensional fuzzy simplicial sets. In practice this is done by
-  sampling edges based on their membership strength (with the (1-p) terms
-  coming from negative sampling similar to word2vec).
-
-  This is the Euclidean specialization of the optimization, using squared
-  Euclidean distance (rdist) for better performance.
-
-  Parameters
-  ----------
-  head_embedding: array of shape (n_samples, n_components)
-      The initial embedding to be improved by SGD.
-
-  tail_embedding: array of shape (source_samples, n_components)
-      The reference embedding of embedded points. If not embedding new
-      previously unseen points with respect to an existing embedding this
-      is simply the head_embedding (again); otherwise it provides the
-      existing embedding to embed with respect to.
-
-  head: array of shape (n_1_simplices)
-      The indices of the heads of 1-simplices with non-zero membership.
-
-  tail: array of shape (n_1_simplices)
-      The indices of the tails of 1-simplices with non-zero membership.
-
-  n_epochs: int
-      The number of training epochs to use in optimization.
-
-  n_vertices: int
-      The number of vertices (0-simplices) in the dataset.
-
-  epochs_per_sample: array of shape (n_1_simplices)
-      A float value of the number of epochs per 1-simplex. 1-simplices with
-      weaker membership strength will have more epochs between being sampled.
-
-  a: float
-      Parameter of differentiable approximation of right adjoint functor
-
-  b: float
-      Parameter of differentiable approximation of right adjoint functor
-
-  gamma: float (optional, default 1.0)
-      Weight to apply to negative samples.
-
-  initial_alpha: float (optional, default 1.0)
-      Initial learning rate for the SGD.
-
-  negative_sample_rate: float (optional, default 5.0)
-      Number of negative samples to use per positive sample.
-
-  parallel: bool (optional, default true)
-      Whether to run the computation in parallel using rayon.
-
-  move_other: bool (optional, default false)
-      Whether to adjust tail_embedding alongside head_embedding
-
-  Returns
-  -------
-  head_embedding: array of shape (n_samples, n_components)
-      The optimized embedding.
-*/
-#[derive(TypedBuilder)]
-pub struct OptimizeLayoutEuclidean<'a> {
-  head_embedding: &'a mut ArrayViewMut2<'a, f32>,
-  tail_embedding: &'a mut ArrayViewMut2<'a, f32>,
-  head: &'a ArrayView1<'a, u32>,
-  tail: &'a ArrayView1<'a, u32>,
-  n_epochs: usize,
+/// Execute a single epoch of Euclidean UMAP optimization.
+///
+/// Performs one epoch of stochastic gradient descent to optimize the embedding,
+/// using squared Euclidean distance for better performance.
+///
+/// The epoch state arrays are updated in-place, allowing for stateful optimization
+/// with checkpointing support.
+///
+/// # Arguments
+///
+/// * `head_embedding` - The embedding being optimized (mutated in-place)
+/// * `tail_embedding` - Reference embedding (usually same as head for standard UMAP)
+/// * `head` - Head vertex indices for each edge
+/// * `tail` - Tail vertex indices for each edge
+/// * `n_vertices` - Total number of vertices in the dataset
+/// * `epochs_per_sample` - Sampling frequency for each edge
+/// * `a`, `b` - Curve parameters for distance-to-probability transformation
+/// * `gamma` - Repulsion strength for negative samples
+/// * `alpha` - Current learning rate for this epoch
+/// * `epochs_per_negative_sample` - Negative sampling frequency per edge
+/// * `epoch_of_next_sample` - Next epoch to sample each positive edge (mutated)
+/// * `epoch_of_next_negative_sample` - Next epoch for negative sampling (mutated)
+/// * `current_epoch` - Current epoch number
+/// * `parallel` - Whether to use parallel execution
+/// * `move_other` - Whether to update tail_embedding as well
+#[allow(clippy::too_many_arguments)]
+pub fn optimize_layout_euclidean_single_epoch_stateful(
+  head_embedding: &mut ArrayViewMut2<f32>,
+  tail_embedding: &mut ArrayViewMut2<f32>,
+  head: &ArrayView1<u32>,
+  tail: &ArrayView1<u32>,
   n_vertices: usize,
-  epochs_per_sample: &'a ArrayView1<'a, f64>,
+  epochs_per_sample: &ArrayView1<f64>,
   a: f32,
   b: f32,
-  #[builder(default = 1.0)]
   gamma: f32,
-  #[builder(default = 1.0)]
-  initial_alpha: f32,
-  #[builder(default = 5.0)]
-  negative_sample_rate: f64,
-  #[builder(default = true)]
+  alpha: f32,
+  epochs_per_negative_sample: &mut Array1<f64>,
+  epoch_of_next_sample: &mut Array1<f64>,
+  epoch_of_next_negative_sample: &mut Array1<f64>,
+  current_epoch: usize,
   parallel: bool,
-  #[builder(default = false)]
   move_other: bool,
-}
+) {
+  let dim = head_embedding.shape()[1];
 
-impl<'a> OptimizeLayoutEuclidean<'a> {
-  pub fn exec(self) {
-    let Self {
+  if parallel {
+    optimize_layout_euclidean_single_epoch_parallel(
       head_embedding,
       tail_embedding,
       head,
       tail,
-      n_epochs,
       n_vertices,
       epochs_per_sample,
       a,
       b,
       gamma,
-      initial_alpha,
-      negative_sample_rate,
-      parallel,
+      dim,
       move_other,
-    } = self;
-
-    let dim = head_embedding.shape()[1];
-
-    // Calculate epochs per negative sample
-    let mut epochs_per_negative_sample = Array1::<f64>::zeros(epochs_per_sample.len());
-    for i in 0..epochs_per_sample.len() {
-      epochs_per_negative_sample[i] = epochs_per_sample[i] / negative_sample_rate;
-    }
-    let mut epoch_of_next_negative_sample = epochs_per_negative_sample.clone();
-    let mut epoch_of_next_sample = epochs_per_sample.to_owned();
-
-    let mut alpha = initial_alpha;
-
-    for n in 0..n_epochs {
-
-      if parallel {
-        optimize_layout_euclidean_single_epoch_parallel(
-          head_embedding,
-          tail_embedding,
-          head,
-          tail,
-          n_vertices,
-          epochs_per_sample,
-          a,
-          b,
-          gamma,
-          dim,
-          move_other,
-          alpha,
-          &mut epochs_per_negative_sample,
-          &mut epoch_of_next_negative_sample,
-          &mut epoch_of_next_sample,
-          n,
-        );
-      } else {
-        optimize_layout_euclidean_single_epoch(
-          head_embedding,
-          tail_embedding,
-          head,
-          tail,
-          n_vertices,
-          epochs_per_sample,
-          a,
-          b,
-          gamma,
-          dim,
-          move_other,
-          alpha,
-          &mut epochs_per_negative_sample,
-          &mut epoch_of_next_negative_sample,
-          &mut epoch_of_next_sample,
-          n,
-        );
-      }
-
-      alpha = initial_alpha * (1.0 - (n as f32 / n_epochs as f32));
-    }
+      alpha,
+      epochs_per_negative_sample,
+      epoch_of_next_negative_sample,
+      epoch_of_next_sample,
+      current_epoch,
+    );
+  } else {
+    optimize_layout_euclidean_single_epoch(
+      head_embedding,
+      tail_embedding,
+      head,
+      tail,
+      n_vertices,
+      epochs_per_sample,
+      a,
+      b,
+      gamma,
+      dim,
+      move_other,
+      alpha,
+      epochs_per_negative_sample,
+      epoch_of_next_negative_sample,
+      epoch_of_next_sample,
+      current_epoch,
+    );
   }
 }
 

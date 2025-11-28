@@ -100,13 +100,10 @@ impl<'a, 's, 'r, 'd> ComputeMembershipStrengths<'a, 's, 'r, 'd> {
       .collect();
 
     // Unzip into separate arrays
-    let (rows, cols_vals): (Vec<_>, Vec<_>) = results.iter().map(|(r, c, v)| (*r, (*c, *v))).unzip();
+    let (rows, cols_vals): (Vec<_>, Vec<_>) =
+      results.iter().map(|(r, c, v)| (*r, (*c, *v))).unzip();
     let (cols, vals): (Vec<_>, Vec<_>) = cols_vals.into_iter().unzip();
 
-    (
-      Array1::from(rows),
-      Array1::from(cols),
-      Array1::from(vals),
-    )
+    (Array1::from(rows), Array1::from(cols), Array1::from(vals))
   }
 }
