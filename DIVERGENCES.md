@@ -47,7 +47,9 @@ The following Python UMAP features were intentionally removed per project requir
 
 ## Simplifications
 
-**Set operations in FuzzySimplicialSet:** Python uses sparse matrix scalar multiplication then element-wise ops. Rust uses direct TriMat construction with scaled values. Mathematically identical, fewer intermediate allocations.
+**Set operations in FuzzySimplicialSet:** Python uses sparse matrix scalar multiplication then element-wise ops (transpose, hadamard, add). Rust fuses all operations into a single parallel pass: for each unique position, the formula `mix*(A + A^T) + (1-2*mix)*(A ⊙ A^T)` is computed directly. Mathematically equivalent, but may differ by floating-point epsilon (~1e-7) due to different operation ordering. This is acceptable since UMAP's SGD is inherently stochastic.
+
+**Parallel graph construction:** Python UMAP's `smooth_knn_dist` runs sequentially (Numba JIT but single-threaded for this phase). Rust parallelizes the per-sample binary search via Rayon. Results are identical.
 
 **Epoch tracking:** Python modifies arrays in-place within numba kernels. Rust uses the same pattern but with explicit `UnsafeSyncCell` wrapper for clarity.
 

@@ -277,6 +277,7 @@ cargo build --release
 
 ## Performance
 
+- **Parallel graph construction**: Fuzzy simplicial set computation is fully parallelized via Rayon
 - **Parallel SGD**: Enabled by default via Rayon
 - **Hogwild! algorithm**: Lock-free parallel gradient descent
 

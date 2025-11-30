@@ -142,12 +142,13 @@ edges.par_iter().for_each(|edge| {
 ```
 umap.fit(X)
 ├─ 1. KNN search (external, precomputed)
-├─ 2. fuzzy_simplicial_set
-│   ├─ smooth_knn_dist (compute σ, ρ for each point)
-│   └─ compute_membership_strengths (compute weights wᵢⱼ)
+├─ 2. fuzzy_simplicial_set [PARALLEL]
+│   ├─ smooth_knn_dist (compute σ, ρ for each point) [PARALLEL - per sample]
+│   ├─ compute_membership_strengths (compute weights wᵢⱼ) [PARALLEL]
+│   └─ set_operations (symmetrize graph) [PARALLEL - fused formula]
 ├─ 3. simplicial_set_embedding
 │   ├─ init_graph_transform (spectral initialization)
-│   └─ optimize_layout_euclidean (SGD with parallelism)
+│   └─ optimize_layout_euclidean (SGD with parallelism) [PARALLEL - Hogwild!]
 │       ├─ Attractive updates (connected edges)
 │       └─ Repulsive updates (negative sampling)
 └─ Return 2D embedding

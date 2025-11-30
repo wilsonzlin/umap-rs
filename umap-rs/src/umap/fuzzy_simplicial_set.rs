@@ -1,13 +1,12 @@
 use crate::umap::compute_membership_strengths::ComputeMembershipStrengths;
 use crate::umap::smooth_knn_dist::SmoothKnnDist;
 use dashmap::DashSet;
-use itertools::izip;
 use ndarray::Array1;
 use ndarray::ArrayView2;
+use rayon::prelude::*;
 use sprs::CsMat;
-use sprs::CsMatView;
 use sprs::TriMat;
-use std::iter::zip;
+use std::collections::HashSet;
 use typed_builder::TypedBuilder;
 
 /*
@@ -112,59 +111,92 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
       .build()
       .exec();
 
-    let mut result = {
-      let mut mat = TriMat::new((n_samples, n_samples));
-      for (v, r, c) in izip!(vals, rows, cols) {
+    // Parallel triplet collection: filter zero values in parallel
+    let triplets: Vec<(usize, usize, f32)> = rows
+      .as_slice()
+      .unwrap()
+      .par_iter()
+      .zip(cols.as_slice().unwrap().par_iter())
+      .zip(vals.as_slice().unwrap().par_iter())
+      .filter_map(|((&r, &c), &v)| {
         if v != 0.0 {
-          mat.add_triplet(r as usize, c as usize, v);
+          Some((r as usize, c as usize, v))
+        } else {
+          None
         }
-      }
-      mat.to_csr::<usize>()
-    };
+      })
+      .collect();
+
+    // Build TriMat from collected triplets (sequential but fast - just appending)
+    let mut mat = TriMat::with_capacity((n_samples, n_samples), triplets.len());
+    for (r, c, v) in triplets {
+      mat.add_triplet(r, c, v);
+    }
+    let mut result = mat.to_csr::<usize>();
 
     if apply_set_operations {
-      let transpose = result.transpose_view().to_csr();
-      let prod_matrix = hadamard(&result.view(), &transpose.view());
-
-      // Compute: set_op_mix_ratio * (result + transpose - prod_matrix) + (1 - set_op_mix_ratio) * prod_matrix
-      // This simplifies to: set_op_mix_ratio * (result + transpose) + (1 - 2*set_op_mix_ratio) * prod_matrix
-      let mut tri = TriMat::new(result.shape());
-
-      // Add set_op_mix_ratio * (result + transpose)
-      for (val, (row, col)) in result.iter() {
-        tri.add_triplet(row, col, set_op_mix_ratio * val);
-      }
-      for (val, (row, col)) in transpose.iter() {
-        tri.add_triplet(row, col, set_op_mix_ratio * val);
-      }
-
-      // Add (1 - 2*set_op_mix_ratio) * prod_matrix
-      let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
-      for (val, (row, col)) in prod_matrix.iter() {
-        tri.add_triplet(row, col, prod_coeff * val);
-      }
-
-      result = tri.to_csr::<usize>();
+      result = apply_set_operations_parallel(&result, set_op_mix_ratio);
     }
 
     (result, sigmas, rhos)
   }
 }
 
-/// Compute elementwise (Hadamard) product of two same‑shape CSRs.
-fn hadamard(a: &CsMatView<f32>, b: &CsMatView<f32>) -> CsMat<f32> {
-  assert_eq!(a.shape(), b.shape(), "shapes must match for hadamard");
-  let mut tri = TriMat::new(a.shape());
-  // iterate nonzeros of `a`
-  for (row, vec) in a.outer_iterator().enumerate() {
-    for (&col, &av) in zip(vec.indices().iter(), vec.data()) {
-      if let Some(&bv) = b.get(row, col) {
-        let prod = av * bv;
-        if prod != 0.0 {
-          tri.add_triplet(row, col, prod);
-        }
+/// Apply fuzzy set union/intersection operations in a single parallel pass.
+///
+/// Computes: set_op_mix_ratio * (A + A^T) + (1 - 2*set_op_mix_ratio) * (A ⊙ A^T)
+/// where ⊙ is the Hadamard (elementwise) product.
+///
+/// This fuses the transpose, hadamard, and combination into one parallel operation
+/// by computing each output value directly from the formula.
+fn apply_set_operations_parallel(result: &CsMat<f32>, set_op_mix_ratio: f32) -> CsMat<f32> {
+  let shape = result.shape();
+  let n_samples = shape.0;
+
+  // Collect all canonical pairs (min(i,j), max(i,j)) from non-zero positions
+  // This avoids processing the same pair twice
+  let canonical_pairs: HashSet<(usize, usize)> = result
+    .iter()
+    .map(|(_, (r, c))| (r.min(c), r.max(c)))
+    .collect();
+
+  // Convert to Vec for parallel iteration
+  let pairs: Vec<(usize, usize)> = canonical_pairs.into_iter().collect();
+
+  // Parallel computation of fused formula for each position
+  let triplets: Vec<(usize, usize, f32)> = pairs
+    .into_par_iter()
+    .flat_map(|(a, b)| {
+      // Look up values: result[a,b] and result[b,a]
+      let val_ab = result.get(a, b).copied().unwrap_or(0.0);
+      let val_ba = result.get(b, a).copied().unwrap_or(0.0);
+
+      // Fused formula: mix * (A + A^T) + (1 - 2*mix) * (A ⊙ A^T)
+      // At position (a, b): mix * val_ab + mix * val_ba + (1 - 2*mix) * val_ab * val_ba
+      let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
+      let final_val =
+        set_op_mix_ratio * val_ab + set_op_mix_ratio * val_ba + prod_coeff * val_ab * val_ba;
+
+      let mut out = Vec::with_capacity(2);
+
+      if final_val != 0.0 {
+        out.push((a, b, final_val));
       }
-    }
+
+      // For off-diagonal elements, also emit (b, a) with same value
+      // (the formula is symmetric: mix*x + mix*y + (1-2*mix)*xy = mix*y + mix*x + (1-2*mix)*yx)
+      if a != b && final_val != 0.0 {
+        out.push((b, a, final_val));
+      }
+
+      out
+    })
+    .collect();
+
+  // Build final TriMat from computed triplets
+  let mut tri = TriMat::with_capacity((n_samples, n_samples), triplets.len());
+  for (r, c, v) in triplets {
+    tri.add_triplet(r, c, v);
   }
   tri.to_csr::<usize>()
 }
