@@ -93,6 +93,16 @@ This avoids:
 
 **Memory**: Only stores the final CSR arrays (indptr, indices, data) plus temporary row counts. No intermediate triplet/COO storage.
 
+### u32 indices and CSC structure-only optimization
+For datasets up to ~4 billion samples, `SparseMat` uses `u32` indices instead of `usize`:
+- Halves index memory (4 bytes vs 8 bytes per entry)
+- `CsMatI<f32, u32>` stores indptr and indices as `Vec<u32>`
+
+The CSC (transpose) representation stores only structure (indptr + indices), not data:
+- Avoids duplicating the data array entirely
+- Values are looked up in original CSR via binary search O(log k), where k ≈ 256
+- This is fast enough since k is small
+
 ### Distance calculations
 Both Euclidean implementations use squared distance to avoid sqrt:
 

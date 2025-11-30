@@ -65,6 +65,7 @@ pub use manifold::LearnedManifold;
 pub use metric::Metric;
 pub use metric::MetricType;
 pub use optimizer::Optimizer;
+pub use umap::SparseMat;
 
 // Internal modules (not exposed)
 mod distances;

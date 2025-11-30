@@ -102,7 +102,8 @@ impl Optimizer {
     let mut tri = TriMat::new(graph.shape());
     for (&val, (row, col)) in graph.iter() {
       if val >= threshold {
-        tri.add_triplet(row, col, val);
+        // Convert u32 indices to usize for TriMat
+        tri.add_triplet(row as usize, col as usize, val);
       }
     }
     let filtered_graph = tri.to_csr::<usize>();

@@ -4,14 +4,34 @@ use ndarray::Array1;
 use ndarray::ArrayView1;
 use ndarray::ArrayView2;
 use rayon::prelude::*;
-use sprs::CsMat;
 use sprs::CsMatI;
 use std::cell::UnsafeCell;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::info;
 use typed_builder::TypedBuilder;
+
+/// Sparse matrix with u32 indices to save memory (4 bytes vs 8 bytes per index).
+/// Valid for n_samples < 2^32 (~4 billion).
+pub type SparseMat = CsMatI<f32, u32>;
+
+/// CSC structure without data - only stores indptr and indices for transpose traversal.
+/// Values are looked up in the original CSR via binary search O(log k).
+struct CscStructure {
+  indptr: Vec<u32>,  // Column pointers
+  indices: Vec<u32>, // Row indices (which rows have entries in each column)
+}
+
+impl CscStructure {
+  /// Iterate over (row_index) for entries in the given column
+  #[inline]
+  fn col_row_indices(&self, col: usize) -> &[u32] {
+    let start = self.indptr[col] as usize;
+    let end = self.indptr[col + 1] as usize;
+    &self.indices[start..end]
+  }
+}
 
 /// A Vec wrapped in UnsafeCell for parallel write access to disjoint regions.
 ///
@@ -157,7 +177,12 @@ pub struct FuzzySimplicialSet<'a, 'd> {
 }
 
 impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
-  pub fn exec(self) -> (CsMat<f32>, Array1<f32>, Array1<f32>) {
+  pub fn exec(self) -> (SparseMat, Array1<f32>, Array1<f32>) {
+    assert!(
+      self.n_samples < u32::MAX as usize,
+      "n_samples must be < 2^32 for u32 indices"
+    );
+
     // Extract the fields we need
     let knn_dists = self.knn_dists;
     let knn_indices = self.knn_indices;
@@ -181,6 +206,7 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
     );
 
     // Build CSR directly - no intermediate allocations
+    // Uses u32 indices to halve index memory
     let started = Instant::now();
     let mut result = build_membership_csr(
       n_samples,
@@ -211,7 +237,7 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
 }
 
 /// Build CSR matrix directly from KNN data without intermediate allocations.
-/// This avoids creating massive temporary arrays that would be needed with COO/triplet format.
+/// Uses u32 indices to halve index memory (4 bytes vs 8 bytes per index).
 fn build_membership_csr(
   n_samples: usize,
   n_neighbors: usize,
@@ -220,13 +246,13 @@ fn build_membership_csr(
   knn_disconnections: &DashSet<(usize, usize)>,
   sigmas: &ArrayView1<f32>,
   rhos: &ArrayView1<f32>,
-) -> CsMat<f32> {
+) -> SparseMat {
   // Step 1: Count valid (non-zero) entries per row in parallel
   let started = Instant::now();
-  let row_counts: Vec<usize> = (0..n_samples)
+  let row_counts: Vec<u32> = (0..n_samples)
     .into_par_iter()
     .map(|i| {
-      let mut count = 0;
+      let mut count = 0u32;
       for j in 0..n_neighbors {
         if knn_disconnections.contains(&(i, j)) {
           continue;
@@ -249,16 +275,16 @@ fn build_membership_csr(
     "csr row_counts complete"
   );
 
-  // Step 2: Build indptr from prefix sum
+  // Step 2: Build indptr from prefix sum (u32 for memory efficiency)
   let started = Instant::now();
-  let mut indptr: Vec<usize> = Vec::with_capacity(n_samples + 1);
+  let mut indptr: Vec<u32> = Vec::with_capacity(n_samples + 1);
   indptr.push(0);
-  let mut total = 0usize;
+  let mut total = 0u32;
   for &count in &row_counts {
-    total += count;
+    total = total.checked_add(count).expect("nnz overflows u32");
     indptr.push(total);
   }
-  let nnz = total;
+  let nnz = total as usize;
   info!(
     duration_ms = started.elapsed().as_millis(),
     nnz, "csr indptr complete"
@@ -266,24 +292,24 @@ fn build_membership_csr(
 
   // Step 3: Pre-allocate indices and data, wrap in UnsafeCell for parallel access
   // SAFETY: Each row i writes only to [indptr[i]..indptr[i+1]], which are disjoint
-  let indices_vec = ParallelVec::new(vec![0usize; nnz]);
+  let indices_vec = ParallelVec::new(vec![0u32; nnz]);
   let data_vec = ParallelVec::new(vec![0.0f32; nnz]);
 
   // Step 4: Fill indices and data in parallel (each row writes to its own section)
-  // No false sharing: each row is ~256 elements (~2KB), writes are sequential within row.
+  // No false sharing: each row is ~256 elements (~1KB with u32), writes are sequential within row.
   // Threads work on different rows, not adjacent elements.
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|i| {
-    let row_start = indptr[i];
+    let row_start = indptr[i] as usize;
     let mut offset = 0;
 
     for j in 0..n_neighbors {
       if knn_disconnections.contains(&(i, j)) {
         continue;
       }
-      let knn_idx = knn_indices[(i, j)] as usize;
+      let knn_idx = knn_indices[(i, j)];
       // Skip self-loops and sentinel values (must match count phase exactly)
-      if knn_idx == i || knn_idx >= n_samples {
+      if knn_idx as usize == i || knn_idx as usize >= n_samples {
         continue;
       }
       let val = compute_membership_strength(i, j, knn_dists, rhos, sigmas);
@@ -306,8 +332,8 @@ fn build_membership_csr(
   // Each row can be sorted independently in parallel
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|i| {
-    let row_start = indptr[i];
-    let row_len = indptr[i + 1] - row_start;
+    let row_start = indptr[i] as usize;
+    let row_len = (indptr[i + 1] - indptr[i]) as usize;
     if row_len > 0 {
       // SAFETY: Each row accesses disjoint section [indptr[i]..indptr[i+1]]
       let row_indices = unsafe { indices_vec.get_mut_slice(row_start, row_len) };
@@ -350,21 +376,22 @@ fn compute_membership_strength(
   }
 }
 
-/// Parallel CSR to CSC conversion. sprs::to_csc() is sequential O(nnz).
-fn parallel_csr_to_csc(csr: &CsMat<f32>) -> CsMat<f32> {
+/// Build CSC structure (indptr + indices only, no data) for transpose traversal.
+/// Values are looked up in original CSR when needed via binary search O(log k).
+fn build_csc_structure(csr: &SparseMat) -> CscStructure {
   let n_rows = csr.shape().0;
   let n_cols = csr.shape().1;
   let nnz = csr.nnz();
 
   // Step 1: Count entries per column (parallel with atomics)
   let started = Instant::now();
-  let col_counts: Vec<AtomicUsize> = (0..n_cols).map(|_| AtomicUsize::new(0)).collect();
+  let col_counts: Vec<AtomicU32> = (0..n_cols).map(|_| AtomicU32::new(0)).collect();
 
   (0..n_rows).into_par_iter().for_each(|row| {
-    let row_start = csr.indptr().index(row);
-    let row_end = csr.indptr().index(row + 1);
+    let row_start = csr.indptr().index(row) as usize;
+    let row_end = csr.indptr().index(row + 1) as usize;
     for &col in &csr.indices()[row_start..row_end] {
-      col_counts[col].fetch_add(1, Ordering::Relaxed);
+      col_counts[col as usize].fetch_add(1, Ordering::Relaxed);
     }
   });
   info!(
@@ -374,38 +401,36 @@ fn parallel_csr_to_csc(csr: &CsMat<f32>) -> CsMat<f32> {
 
   // Step 2: Build column pointers (prefix sum)
   let started = Instant::now();
-  let mut indptr: Vec<usize> = Vec::with_capacity(n_cols + 1);
+  let mut indptr: Vec<u32> = Vec::with_capacity(n_cols + 1);
   indptr.push(0);
-  let mut total = 0usize;
+  let mut total = 0u32;
   for count in &col_counts {
-    total += count.load(Ordering::Relaxed);
+    total = total
+      .checked_add(count.load(Ordering::Relaxed))
+      .expect("nnz overflows u32");
     indptr.push(total);
   }
-  assert_eq!(total, nnz);
+  assert_eq!(total as usize, nnz);
   info!(
     duration_ms = started.elapsed().as_millis(),
     "csc indptr complete"
   );
 
-  // Step 3: Fill indices and data (sequential to avoid atomic contention)
-  // Parallel atomics cause extreme contention when many rows share popular columns.
-  // Sequential fill is memory-bandwidth bound and actually fast for this access pattern.
+  // Step 3: Fill indices only (sequential to avoid atomic contention)
+  // No data array - values will be looked up in CSR when needed.
   let started = Instant::now();
-  let mut indices: Vec<usize> = vec![0; nnz];
-  let mut data: Vec<f32> = vec![0.0; nnz];
-  let mut col_offsets: Vec<usize> = vec![0; n_cols];
+  let mut indices: Vec<u32> = vec![0; nnz];
+  let mut col_offsets: Vec<u32> = vec![0; n_cols];
 
   for row in 0..n_rows {
-    let row_start = csr.indptr().index(row);
-    let row_end = csr.indptr().index(row + 1);
+    let row_start = csr.indptr().index(row) as usize;
+    let row_end = csr.indptr().index(row + 1) as usize;
     let row_indices = &csr.indices()[row_start..row_end];
-    let row_data = &csr.data()[row_start..row_end];
 
-    for (&col, &val) in row_indices.iter().zip(row_data) {
-      let write_pos = indptr[col] + col_offsets[col];
-      indices[write_pos] = row;
-      data[write_pos] = val;
-      col_offsets[col] += 1;
+    for &col in row_indices {
+      let write_pos = (indptr[col as usize] + col_offsets[col as usize]) as usize;
+      indices[write_pos] = row as u32;
+      col_offsets[col as usize] += 1;
     }
   }
   info!(
@@ -414,8 +439,21 @@ fn parallel_csr_to_csc(csr: &CsMat<f32>) -> CsMat<f32> {
   );
   // No sorting needed: iterating rows in order guarantees sorted row indices per column
 
-  // CSC is stored as CSR of transpose: shape is (n_cols, n_rows)
-  CsMatI::new_csc((n_rows, n_cols), indptr, indices, data)
+  CscStructure { indptr, indices }
+}
+
+/// Binary search for value A[row, col] in CSR matrix. Returns 0.0 if not found.
+#[inline]
+fn csr_get(csr: &SparseMat, row: usize, col: u32) -> f32 {
+  let row_start = csr.indptr().index(row) as usize;
+  let row_end = csr.indptr().index(row + 1) as usize;
+  let row_indices = &csr.indices()[row_start..row_end];
+  let row_data = &csr.data()[row_start..row_end];
+
+  match row_indices.binary_search(&col) {
+    Ok(idx) => row_data[idx],
+    Err(_) => 0.0,
+  }
 }
 
 /// Apply fuzzy set union/intersection operations, building CSR directly.
@@ -425,16 +463,17 @@ fn parallel_csr_to_csc(csr: &CsMat<f32>) -> CsMat<f32> {
 ///
 /// The result is symmetric: for each pair (i,j) where A[i,j] OR A[j,i] is non-zero,
 /// both output[i,j] and output[j,i] are set to the same computed value.
-fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> CsMat<f32> {
+fn apply_set_operations_parallel(input: &SparseMat, set_op_mix_ratio: f32) -> SparseMat {
   let n_samples = input.shape().0;
   let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
 
-  // Convert to CSC for efficient column (transpose) access - parallel implementation
+  // Build CSC structure (no data) for efficient transpose traversal
+  // Values are looked up in original CSR via binary search (avoids duplicating data array)
   let started = Instant::now();
-  let input_csc = parallel_csr_to_csc(input);
+  let csc = build_csc_structure(input);
   info!(
     duration_ms = started.elapsed().as_millis(),
-    "set_operations to_csc complete"
+    "set_operations csc_structure complete"
   );
 
   // Step 1: Count output entries per row
@@ -442,18 +481,18 @@ fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> C
   //   - A's row r (direct entries)
   //   - A's column r where A[r,c] doesn't exist (transpose entries without direct counterpart)
   let started = Instant::now();
-  let row_counts: Vec<usize> = (0..n_samples)
+  let row_counts: Vec<u32> = (0..n_samples)
     .into_par_iter()
     .map(|row| {
       // Count from A's row (direct entries)
-      let row_start = input.indptr().index(row);
-      let row_end = input.indptr().index(row + 1);
+      let row_start = input.indptr().index(row) as usize;
+      let row_end = input.indptr().index(row + 1) as usize;
       let row_indices = &input.indices()[row_start..row_end];
       let row_data = &input.data()[row_start..row_end];
 
-      let mut count = 0;
+      let mut count = 0u32;
       for (&col, &val_rc) in row_indices.iter().zip(row_data) {
-        let val_cr = input.get(col, row).copied().unwrap_or(0.0);
+        let val_cr = csr_get(input, col as usize, row as u32);
         let final_val =
           set_op_mix_ratio * val_rc + set_op_mix_ratio * val_cr + prod_coeff * val_rc * val_cr;
         if final_val != 0.0 {
@@ -462,17 +501,14 @@ fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> C
       }
 
       // Count from A's column (transpose entries without direct counterpart)
-      let col_start = input_csc.indptr().index(row);
-      let col_end = input_csc.indptr().index(row + 1);
-      let col_indices = &input_csc.indices()[col_start..col_end];
-      let col_data = &input_csc.data()[col_start..col_end];
-
-      for (&c, &val_cr) in col_indices.iter().zip(col_data) {
-        // Skip if direct entry exists (already counted above)
-        if input.get(row, c).is_some() {
+      // CSC tells us which rows c have entries in column `row` (i.e., A[c, row] exists)
+      for &c in csc.col_row_indices(row) {
+        // Skip if direct entry A[row, c] exists (already counted above)
+        if csr_get(input, row, c) != 0.0 {
           continue;
         }
-        // val_rc = 0 since no direct entry
+        // val_rc = 0 since no direct entry, val_cr = A[c, row]
+        let val_cr = csr_get(input, c as usize, row as u32);
         let final_val = set_op_mix_ratio * val_cr; // Simplified: 0 + mix*val_cr + 0
         if final_val != 0.0 {
           count += 1;
@@ -489,14 +525,14 @@ fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> C
 
   // Step 2: Build indptr
   let started = Instant::now();
-  let mut indptr: Vec<usize> = Vec::with_capacity(n_samples + 1);
+  let mut indptr: Vec<u32> = Vec::with_capacity(n_samples + 1);
   indptr.push(0);
-  let mut total = 0usize;
+  let mut total = 0u32;
   for &count in &row_counts {
-    total += count;
+    total = total.checked_add(count).expect("nnz overflows u32");
     indptr.push(total);
   }
-  let nnz = total;
+  let nnz = total as usize;
   info!(
     duration_ms = started.elapsed().as_millis(),
     nnz, "set_operations indptr complete"
@@ -504,24 +540,24 @@ fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> C
 
   // Step 3: Pre-allocate and wrap in UnsafeCell for parallel access
   // SAFETY: Each row writes only to [indptr[row]..indptr[row+1]], which are disjoint
-  // No false sharing: each row section is ~512 elements (~4KB after symmetrization),
+  // No false sharing: each row section is ~512 elements (~2KB after symmetrization with u32),
   // writes are sequential within row. Threads work on different rows.
-  let indices_vec = ParallelVec::new(vec![0usize; nnz]);
+  let indices_vec = ParallelVec::new(vec![0u32; nnz]);
   let data_vec = ParallelVec::new(vec![0.0f32; nnz]);
 
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|row| {
-    let out_start = indptr[row];
+    let out_start = indptr[row] as usize;
     let mut offset = 0;
 
     // Fill from A's row (direct entries)
-    let row_start = input.indptr().index(row);
-    let row_end = input.indptr().index(row + 1);
+    let row_start = input.indptr().index(row) as usize;
+    let row_end = input.indptr().index(row + 1) as usize;
     let row_indices = &input.indices()[row_start..row_end];
     let row_data = &input.data()[row_start..row_end];
 
     for (&col, &val_rc) in row_indices.iter().zip(row_data) {
-      let val_cr = input.get(col, row).copied().unwrap_or(0.0);
+      let val_cr = csr_get(input, col as usize, row as u32);
       let final_val =
         set_op_mix_ratio * val_rc + set_op_mix_ratio * val_cr + prod_coeff * val_rc * val_cr;
       if final_val != 0.0 {
@@ -535,15 +571,12 @@ fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> C
     }
 
     // Fill from A's column (transpose entries without direct counterpart)
-    let col_start = input_csc.indptr().index(row);
-    let col_end = input_csc.indptr().index(row + 1);
-    let col_indices = &input_csc.indices()[col_start..col_end];
-    let col_data = &input_csc.data()[col_start..col_end];
-
-    for (&c, &val_cr) in col_indices.iter().zip(col_data) {
-      if input.get(row, c).is_some() {
+    for &c in csc.col_row_indices(row) {
+      // Skip if direct entry exists (already filled above)
+      if csr_get(input, row, c) != 0.0 {
         continue;
       }
+      let val_cr = csr_get(input, c as usize, row as u32);
       let final_val = set_op_mix_ratio * val_cr;
       if final_val != 0.0 {
         // SAFETY: Each row writes to disjoint section
@@ -563,8 +596,8 @@ fn apply_set_operations_parallel(input: &CsMat<f32>, set_op_mix_ratio: f32) -> C
   // Step 4: Sort columns within each row (entries may be unsorted after combining)
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|row| {
-    let row_start = indptr[row];
-    let row_len = indptr[row + 1] - row_start;
+    let row_start = indptr[row] as usize;
+    let row_len = (indptr[row + 1] - indptr[row]) as usize;
     if row_len > 1 {
       // SAFETY: Each row accesses disjoint section
       let row_indices = unsafe { indices_vec.get_mut_slice(row_start, row_len) };

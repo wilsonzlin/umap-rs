@@ -51,6 +51,10 @@ The following Python UMAP features were intentionally removed per project requir
 
 **Direct CSR construction:** Python UMAP builds sparse matrices via COO/triplet format then converts to CSR (O(nnz log nnz) sorting). Rust builds CSR directly by: (1) counting entries per row in parallel, (2) computing prefix sums for row pointers, (3) filling data in parallel per-row, (4) sorting within each row in parallel. This is O(nnz) with only O(k log k) sorting per row where k is row length. This avoids allocating O(nnz) intermediate triplet arrays.
 
+**u32 sparse matrix indices:** Rust uses `CsMatI<f32, u32>` instead of `CsMat<f32>` (which uses `usize`). This halves index memory (4 bytes vs 8 bytes per entry). Valid for datasets up to ~4 billion samples.
+
+**CSC structure-only for transpose:** During set operations, Python UMAP fully converts the matrix to CSC format (duplicating data). Rust builds only the CSC structure (indptr + indices) and looks up values in the original CSR via binary search O(log k). Since k ≈ 256, this is fast and avoids duplicating the data array.
+
 **Parallel graph construction:** Python UMAP's `smooth_knn_dist` runs sequentially (Numba JIT but single-threaded for this phase). Rust parallelizes the per-sample binary search via Rayon. Results are identical.
 
 **Epoch tracking:** Python modifies arrays in-place within numba kernels. Rust uses the same pattern but with explicit `UnsafeSyncCell` wrapper for clarity.

@@ -1,7 +1,7 @@
+use crate::umap::SparseMat;
 use ndarray::Array1;
 use serde::Deserialize;
 use serde::Serialize;
-use sprs::CsMat;
 
 /// A learned manifold representation from high-dimensional data.
 ///
@@ -13,9 +13,9 @@ use sprs::CsMat;
 /// used to create multiple different embeddings or continue optimization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearnedManifold {
-  /// Fuzzy simplicial set as a sparse matrix.
+  /// Fuzzy simplicial set as a sparse matrix with u32 indices.
   /// graph[i,j] represents the membership strength of edge i->j.
-  pub(crate) graph: CsMat<f32>,
+  pub(crate) graph: SparseMat,
 
   /// Normalization factors from local manifold approximation.
   /// sigma[i] is the distance to the local_connectivity'th nearest neighbor.
@@ -49,7 +49,7 @@ impl LearnedManifold {
   }
 
   /// Get a reference to the graph structure.
-  pub fn graph(&self) -> &CsMat<f32> {
+  pub fn graph(&self) -> &SparseMat {
     &self.graph
   }
 }
