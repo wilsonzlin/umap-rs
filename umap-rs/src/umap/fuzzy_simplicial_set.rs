@@ -229,9 +229,9 @@ fn build_membership_csr(
         if knn_disconnections.contains(&(i, j)) {
           continue;
         }
-        let knn_idx = knn_indices[(i, j)];
-        // Skip self-loops
-        if knn_idx == i as u32 {
+        let knn_idx = knn_indices[(i, j)] as usize;
+        // Skip self-loops and sentinel values (e.g. u32::MAX used when KNN couldn't find k neighbors)
+        if knn_idx == i || knn_idx >= n_samples {
           continue;
         }
         let val = compute_membership_strength(i, j, knn_dists, rhos, sigmas);
@@ -280,7 +280,8 @@ fn build_membership_csr(
         continue;
       }
       let knn_idx = knn_indices[(i, j)] as usize;
-      if knn_idx == i {
+      // Skip self-loops and sentinel values (must match count phase exactly)
+      if knn_idx == i || knn_idx >= n_samples {
         continue;
       }
       let val = compute_membership_strength(i, j, knn_dists, rhos, sigmas);
