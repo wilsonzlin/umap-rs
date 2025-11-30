@@ -7,7 +7,8 @@ use rayon::prelude::*;
 use sprs::CsMat;
 use sprs::CsMatI;
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::info;
 use typed_builder::TypedBuilder;
@@ -366,7 +367,10 @@ fn parallel_csr_to_csc(csr: &CsMat<f32>) -> CsMat<f32> {
       col_counts[col].fetch_add(1, Ordering::Relaxed);
     }
   });
-  info!(duration_ms = started.elapsed().as_millis(), "csc col_counts complete");
+  info!(
+    duration_ms = started.elapsed().as_millis(),
+    "csc col_counts complete"
+  );
 
   // Step 2: Build column pointers (prefix sum)
   let started = Instant::now();
@@ -378,61 +382,37 @@ fn parallel_csr_to_csc(csr: &CsMat<f32>) -> CsMat<f32> {
     indptr.push(total);
   }
   assert_eq!(total, nnz);
-  info!(duration_ms = started.elapsed().as_millis(), "csc indptr complete");
+  info!(
+    duration_ms = started.elapsed().as_millis(),
+    "csc indptr complete"
+  );
 
-  // Step 3: Reset col_counts to use as write offsets
-  for count in &col_counts {
-    count.store(0, Ordering::Relaxed);
-  }
-
-  // Step 4: Fill indices and data (parallel, atomic offsets per column)
+  // Step 3: Fill indices and data (sequential to avoid atomic contention)
+  // Parallel atomics cause extreme contention when many rows share popular columns.
+  // Sequential fill is memory-bandwidth bound and actually fast for this access pattern.
   let started = Instant::now();
-  let indices_vec = ParallelVec::new(vec![0usize; nnz]);
-  let data_vec = ParallelVec::new(vec![0.0f32; nnz]);
+  let mut indices: Vec<usize> = vec![0; nnz];
+  let mut data: Vec<f32> = vec![0.0; nnz];
+  let mut col_offsets: Vec<usize> = vec![0; n_cols];
 
-  (0..n_rows).into_par_iter().for_each(|row| {
+  for row in 0..n_rows {
     let row_start = csr.indptr().index(row);
     let row_end = csr.indptr().index(row + 1);
     let row_indices = &csr.indices()[row_start..row_end];
     let row_data = &csr.data()[row_start..row_end];
 
     for (&col, &val) in row_indices.iter().zip(row_data) {
-      // Atomically get write position for this column
-      let offset = col_counts[col].fetch_add(1, Ordering::Relaxed);
-      let write_pos = indptr[col] + offset;
-      // SAFETY: Each (col, offset) pair is unique due to atomic fetch_add
-      unsafe {
-        indices_vec.write(write_pos, row);
-        data_vec.write(write_pos, val);
-      }
+      let write_pos = indptr[col] + col_offsets[col];
+      indices[write_pos] = row;
+      data[write_pos] = val;
+      col_offsets[col] += 1;
     }
-  });
-  info!(duration_ms = started.elapsed().as_millis(), "csc fill complete");
-
-  // Step 5: Sort row indices within each column (required for valid CSC)
-  let started = Instant::now();
-  (0..n_cols).into_par_iter().for_each(|col| {
-    let col_start = indptr[col];
-    let col_len = indptr[col + 1] - col_start;
-    if col_len > 1 {
-      let col_indices = unsafe { indices_vec.get_mut_slice(col_start, col_len) };
-      let col_data = unsafe { data_vec.get_mut_slice(col_start, col_len) };
-
-      // Insertion sort (columns are typically small)
-      for k in 1..col_len {
-        let mut m = k;
-        while m > 0 && col_indices[m - 1] > col_indices[m] {
-          col_indices.swap(m - 1, m);
-          col_data.swap(m - 1, m);
-          m -= 1;
-        }
-      }
-    }
-  });
-  info!(duration_ms = started.elapsed().as_millis(), "csc col_sort complete");
-
-  let indices = indices_vec.into_inner();
-  let data = data_vec.into_inner();
+  }
+  info!(
+    duration_ms = started.elapsed().as_millis(),
+    "csc fill complete"
+  );
+  // No sorting needed: iterating rows in order guarantees sorted row indices per column
 
   // CSC is stored as CSR of transpose: shape is (n_cols, n_rows)
   CsMatI::new_csc((n_rows, n_cols), indptr, indices, data)
