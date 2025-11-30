@@ -13,5 +13,5 @@ ndarray = "0.17.1"
 ndarray-linalg = { version = "0.18", features = ["openblas-static"] }
 plotters = { version = "0.3" }
 rand = "0.9.2"
-umap-rs = { version = "0.3.3", path = "../umap-rs" }
+umap-rs = { version = "0.3.4", path = "../umap-rs" }
 ureq = { version = "3" }
