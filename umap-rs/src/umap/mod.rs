@@ -1,4 +1,3 @@
-pub mod compute_membership_strengths;
 pub mod constants;
 pub mod find_ab_params;
 pub mod fuzzy_simplicial_set;

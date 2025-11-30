@@ -13,6 +13,34 @@
 
 **Do NOT "fix" this by adding locks/atomics.** Performance would tank and it's unnecessary.
 
+### ParallelVec and UnsafeCell usage
+`src/umap/fuzzy_simplicial_set.rs` uses `ParallelVec<T>` for parallel CSR construction. This uses `std::cell::UnsafeCell<Vec<T>>` internally, which is **required** for correct unsafe code:
+
+- `UnsafeCell<T>` is Rust's primitive for interior mutability
+- It tells the compiler "the T inside may be mutated through shared references"
+- Without it, the compiler assumes `&Vec<T>` means immutable contents and may optimize incorrectly (UB)
+- **Correct pattern**: `UnsafeCell<Vec<T>>` - the Vec's contents may be mutated
+- **Wrong pattern**: `UnsafeCell<*mut T>` - only wraps the pointer, not the data
+
+```rust
+struct ParallelVec<T> {
+  data: UnsafeCell<Vec<T>>,  // Vec contents may be mutated through &self
+}
+unsafe impl<T: Send> Sync for ParallelVec<T> {}  // Safe if disjoint writes
+
+impl<T> ParallelVec<T> {
+  unsafe fn write(&self, index: usize, value: T) {
+    let vec = &mut *self.data.get();  // UnsafeCell::get() → *mut Vec<T>
+    *vec.get_unchecked_mut(index) = value;
+  }
+  fn into_inner(self) -> Vec<T> {
+    self.data.into_inner()  // Extract Vec after parallel work
+  }
+}
+```
+
+**Key invariant**: Each row i writes only to `[indptr[i]..indptr[i+1]]`, which are disjoint by construction of the prefix sum.
+
 ### Lifetime patterns in fuzzy_simplicial_set.rs
 `FuzzySimplicialSet<'a, 'd>` has two lifetimes but no bound between them. This is intentional:
 
@@ -49,6 +77,21 @@ This is the hot path. ~80% of runtime is here. Changes here affect performance d
 - `Vec::with_capacity(dim)` is acceptable inside (stack-like, tiny)
 - Do NOT add synchronization primitives
 - Do NOT call external functions that aren't inline
+
+### Direct CSR construction in fuzzy_simplicial_set.rs
+Graph construction uses direct CSR building instead of TriMat/COO to avoid OOM on large datasets:
+
+1. **Count phase**: Parallel count of entries per row
+2. **Indptr phase**: Sequential prefix sum (fast, O(n))
+3. **Fill phase**: Parallel fill, each row writes to `[indptr[i]..indptr[i+1]]`
+4. **Sort phase**: Parallel per-row sort (insertion sort, O(k²) for k~256)
+
+This avoids:
+- Allocating O(nnz) intermediate triplet arrays
+- O(nnz log nnz) global sort (replaced by O(n × k log k) local sorts)
+- Multiple copies during format conversion
+
+**Memory**: Only stores the final CSR arrays (indptr, indices, data) plus temporary row counts. No intermediate triplet/COO storage.
 
 ### Distance calculations
 Both Euclidean implementations use squared distance to avoid sqrt:

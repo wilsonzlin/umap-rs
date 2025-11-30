@@ -144,8 +144,14 @@ umap.fit(X)
 ├─ 1. KNN search (external, precomputed)
 ├─ 2. fuzzy_simplicial_set [PARALLEL]
 │   ├─ smooth_knn_dist (compute σ, ρ for each point) [PARALLEL - per sample]
-│   ├─ compute_membership_strengths (compute weights wᵢⱼ) [PARALLEL]
+│   ├─ build_membership_csr (compute weights wᵢⱼ, direct CSR) [PARALLEL - per row]
+│   │   ├─ Count phase: parallel count entries per row
+│   │   ├─ Indptr phase: prefix sum for row pointers
+│   │   ├─ Fill phase: parallel fill per row section
+│   │   └─ Sort phase: parallel per-row sort (O(k log k))
 │   └─ set_operations (symmetrize graph) [PARALLEL - fused formula]
+│       ├─ CSR→CSC conversion for transpose access
+│       └─ Direct symmetric CSR construction
 ├─ 3. simplicial_set_embedding
 │   ├─ init_graph_transform (spectral initialization)
 │   └─ optimize_layout_euclidean (SGD with parallelism) [PARALLEL - Hogwild!]
