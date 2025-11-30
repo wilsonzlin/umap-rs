@@ -12,23 +12,24 @@ use std::time::Instant;
 use tracing::info;
 use typed_builder::TypedBuilder;
 
-/// Sparse matrix with u32 indices to save memory (4 bytes vs 8 bytes per index).
+/// Sparse matrix with u32 column indices to save memory (4 bytes vs 8 bytes per index).
+/// Uses usize for indptr since nnz can exceed u32::MAX for very large datasets.
 /// Valid for n_samples < 2^32 (~4 billion).
-pub type SparseMat = CsMatI<f32, u32>;
+pub type SparseMat = CsMatI<f32, u32, usize>;
 
 /// CSC structure without data - only stores indptr and indices for transpose traversal.
 /// Values are looked up in the original CSR via binary search O(log k).
 struct CscStructure {
-  indptr: Vec<u32>,  // Column pointers
-  indices: Vec<u32>, // Row indices (which rows have entries in each column)
+  indptr: Vec<usize>,  // Column pointers (usize since nnz can exceed u32::MAX)
+  indices: Vec<u32>,   // Row indices (which rows have entries in each column)
 }
 
 impl CscStructure {
   /// Iterate over (row_index) for entries in the given column
   #[inline]
   fn col_row_indices(&self, col: usize) -> &[u32] {
-    let start = self.indptr[col] as usize;
-    let end = self.indptr[col + 1] as usize;
+    let start = self.indptr[col];
+    let end = self.indptr[col + 1];
     &self.indices[start..end]
   }
 }
@@ -275,16 +276,16 @@ fn build_membership_csr(
     "csr row_counts complete"
   );
 
-  // Step 2: Build indptr from prefix sum (u32 for memory efficiency)
+  // Step 2: Build indptr from prefix sum (usize since nnz can exceed u32::MAX)
   let started = Instant::now();
-  let mut indptr: Vec<u32> = Vec::with_capacity(n_samples + 1);
+  let mut indptr: Vec<usize> = Vec::with_capacity(n_samples + 1);
   indptr.push(0);
-  let mut total = 0u32;
+  let mut total = 0usize;
   for &count in &row_counts {
-    total = total.checked_add(count).expect("nnz overflows u32");
+    total += count as usize;
     indptr.push(total);
   }
-  let nnz = total as usize;
+  let nnz = total;
   info!(
     duration_ms = started.elapsed().as_millis(),
     nnz, "csr indptr complete"
@@ -300,7 +301,7 @@ fn build_membership_csr(
   // Threads work on different rows, not adjacent elements.
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|i| {
-    let row_start = indptr[i] as usize;
+    let row_start = indptr[i];
     let mut offset = 0;
 
     for j in 0..n_neighbors {
@@ -332,8 +333,8 @@ fn build_membership_csr(
   // Each row can be sorted independently in parallel
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|i| {
-    let row_start = indptr[i] as usize;
-    let row_len = (indptr[i + 1] - indptr[i]) as usize;
+    let row_start = indptr[i];
+    let row_len = indptr[i + 1] - indptr[i];
     if row_len > 0 {
       // SAFETY: Each row accesses disjoint section [indptr[i]..indptr[i+1]]
       let row_indices = unsafe { indices_vec.get_mut_slice(row_start, row_len) };
@@ -399,18 +400,16 @@ fn build_csc_structure(csr: &SparseMat) -> CscStructure {
     "csc col_counts complete"
   );
 
-  // Step 2: Build column pointers (prefix sum)
+  // Step 2: Build column pointers (prefix sum, usize since nnz can exceed u32::MAX)
   let started = Instant::now();
-  let mut indptr: Vec<u32> = Vec::with_capacity(n_cols + 1);
+  let mut indptr: Vec<usize> = Vec::with_capacity(n_cols + 1);
   indptr.push(0);
-  let mut total = 0u32;
+  let mut total = 0usize;
   for count in &col_counts {
-    total = total
-      .checked_add(count.load(Ordering::Relaxed))
-      .expect("nnz overflows u32");
+    total += count.load(Ordering::Relaxed) as usize;
     indptr.push(total);
   }
-  assert_eq!(total as usize, nnz);
+  assert_eq!(total, nnz);
   info!(
     duration_ms = started.elapsed().as_millis(),
     "csc indptr complete"
@@ -420,15 +419,15 @@ fn build_csc_structure(csr: &SparseMat) -> CscStructure {
   // No data array - values will be looked up in CSR when needed.
   let started = Instant::now();
   let mut indices: Vec<u32> = vec![0; nnz];
-  let mut col_offsets: Vec<u32> = vec![0; n_cols];
+  let mut col_offsets: Vec<usize> = vec![0; n_cols];
 
   for row in 0..n_rows {
-    let row_start = csr.indptr().index(row) as usize;
-    let row_end = csr.indptr().index(row + 1) as usize;
+    let row_start = csr.indptr().index(row);
+    let row_end = csr.indptr().index(row + 1);
     let row_indices = &csr.indices()[row_start..row_end];
 
     for &col in row_indices {
-      let write_pos = (indptr[col as usize] + col_offsets[col as usize]) as usize;
+      let write_pos = indptr[col as usize] + col_offsets[col as usize];
       indices[write_pos] = row as u32;
       col_offsets[col as usize] += 1;
     }
@@ -445,8 +444,8 @@ fn build_csc_structure(csr: &SparseMat) -> CscStructure {
 /// Binary search for value A[row, col] in CSR matrix. Returns 0.0 if not found.
 #[inline]
 fn csr_get(csr: &SparseMat, row: usize, col: u32) -> f32 {
-  let row_start = csr.indptr().index(row) as usize;
-  let row_end = csr.indptr().index(row + 1) as usize;
+  let row_start = csr.indptr().index(row);
+  let row_end = csr.indptr().index(row + 1);
   let row_indices = &csr.indices()[row_start..row_end];
   let row_data = &csr.data()[row_start..row_end];
 
@@ -485,8 +484,8 @@ fn apply_set_operations_parallel(input: &SparseMat, set_op_mix_ratio: f32) -> Sp
     .into_par_iter()
     .map(|row| {
       // Count from A's row (direct entries)
-      let row_start = input.indptr().index(row) as usize;
-      let row_end = input.indptr().index(row + 1) as usize;
+      let row_start = input.indptr().index(row);
+      let row_end = input.indptr().index(row + 1);
       let row_indices = &input.indices()[row_start..row_end];
       let row_data = &input.data()[row_start..row_end];
 
@@ -523,16 +522,16 @@ fn apply_set_operations_parallel(input: &SparseMat, set_op_mix_ratio: f32) -> Sp
     "set_operations row_counts complete"
   );
 
-  // Step 2: Build indptr
+  // Step 2: Build indptr (usize since output nnz can exceed u32::MAX)
   let started = Instant::now();
-  let mut indptr: Vec<u32> = Vec::with_capacity(n_samples + 1);
+  let mut indptr: Vec<usize> = Vec::with_capacity(n_samples + 1);
   indptr.push(0);
-  let mut total = 0u32;
+  let mut total = 0usize;
   for &count in &row_counts {
-    total = total.checked_add(count).expect("nnz overflows u32");
+    total += count as usize;
     indptr.push(total);
   }
-  let nnz = total as usize;
+  let nnz = total;
   info!(
     duration_ms = started.elapsed().as_millis(),
     nnz, "set_operations indptr complete"
@@ -547,12 +546,12 @@ fn apply_set_operations_parallel(input: &SparseMat, set_op_mix_ratio: f32) -> Sp
 
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|row| {
-    let out_start = indptr[row] as usize;
+    let out_start = indptr[row];
     let mut offset = 0;
 
     // Fill from A's row (direct entries)
-    let row_start = input.indptr().index(row) as usize;
-    let row_end = input.indptr().index(row + 1) as usize;
+    let row_start = input.indptr().index(row);
+    let row_end = input.indptr().index(row + 1);
     let row_indices = &input.indices()[row_start..row_end];
     let row_data = &input.data()[row_start..row_end];
 
@@ -596,8 +595,8 @@ fn apply_set_operations_parallel(input: &SparseMat, set_op_mix_ratio: f32) -> Sp
   // Step 4: Sort columns within each row (entries may be unsorted after combining)
   let started = Instant::now();
   (0..n_samples).into_par_iter().for_each(|row| {
-    let row_start = indptr[row] as usize;
-    let row_len = (indptr[row + 1] - indptr[row]) as usize;
+    let row_start = indptr[row];
+    let row_len = indptr[row + 1] - indptr[row];
     if row_len > 1 {
       // SAFETY: Each row accesses disjoint section
       let row_indices = unsafe { indices_vec.get_mut_slice(row_start, row_len) };
