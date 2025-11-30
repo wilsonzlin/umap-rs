@@ -94,6 +94,24 @@ pub struct GraphParams {
   ///
   /// Default: None (use metric default)
   pub disconnection_distance: Option<f32>,
+
+  /// Whether to symmetrize the KNN graph.
+  ///
+  /// KNN graphs are directed (A→B doesn't imply B→A). Symmetrization makes
+  /// edges bidirectional using fuzzy set operations. This is the standard
+  /// UMAP behavior and produces slightly better cluster coherence.
+  ///
+  /// Set to `false` to skip symmetrization, which:
+  /// - Reduces memory usage (avoids nearly doubling edge count)
+  /// - Speeds up graph construction and SGD optimization
+  /// - May produce slightly less polished cluster boundaries
+  ///
+  /// For 2D visualization, the difference is typically subtle. Disabling
+  /// symmetrization is a reasonable tradeoff for very large datasets where
+  /// memory is constrained.
+  ///
+  /// Default: true
+  pub symmetrize: bool,
 }
 
 impl Default for GraphParams {
@@ -103,6 +121,7 @@ impl Default for GraphParams {
       local_connectivity: 1.0,
       set_op_mix_ratio: 1.0,
       disconnection_distance: None,
+      symmetrize: true,
     }
   }
 }

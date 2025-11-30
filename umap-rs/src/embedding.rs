@@ -204,7 +204,7 @@ impl Umap {
       .knn_disconnections(&knn_disconnections)
       .local_connectivity(self.config.graph.local_connectivity)
       .set_op_mix_ratio(self.config.graph.set_op_mix_ratio)
-      .apply_set_operations(true)
+      .apply_set_operations(self.config.graph.symmetrize)
       .build()
       .exec();
     info!(
