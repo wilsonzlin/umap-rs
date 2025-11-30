@@ -13,6 +13,8 @@ use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use serde::Deserialize;
 use serde::Serialize;
+use std::time::Instant;
+use tracing::info;
 
 /// UMAP dimensionality reduction algorithm.
 ///
@@ -171,6 +173,7 @@ impl Umap {
       .unwrap_or_else(|| self.metric.disconnection_threshold());
 
     // Find and mark disconnected edges
+    let started = Instant::now();
     let knn_disconnections = DashSet::new();
     (0..n_samples).into_par_iter().for_each(|row_no| {
       let row = knn_dists.row(row_no);
@@ -181,8 +184,18 @@ impl Umap {
       }
     });
     let edges_removed = knn_disconnections.len();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      edges_removed, "disconnection detection complete"
+    );
 
     // Build fuzzy simplicial set (the graph)
+    info!(
+      n_samples,
+      n_neighbors = self.config.graph.n_neighbors,
+      "starting fuzzy simplicial set"
+    );
+    let started = Instant::now();
     let (graph, sigmas, rhos) = FuzzySimplicialSet::builder()
       .n_samples(n_samples)
       .n_neighbors(self.config.graph.n_neighbors)
@@ -194,6 +207,10 @@ impl Umap {
       .apply_set_operations(true)
       .build()
       .exec();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "fuzzy simplicial set complete"
+    );
 
     // Check for disconnected vertices
     let vertices_disconnected = graph

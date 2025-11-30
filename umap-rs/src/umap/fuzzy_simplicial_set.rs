@@ -6,6 +6,8 @@ use ndarray::ArrayView2;
 use rayon::prelude::*;
 use sprs::CsMat;
 use sprs::TriMat;
+use std::time::Instant;
+use tracing::info;
 use typed_builder::TypedBuilder;
 
 /*
@@ -94,13 +96,19 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
     let set_op_mix_ratio = self.set_op_mix_ratio;
     let apply_set_operations = self.apply_set_operations;
 
+    let started = Instant::now();
     let (sigmas, rhos) = SmoothKnnDist::builder()
       .distances(knn_dists)
       .k(n_neighbors)
       .local_connectivity(local_connectivity)
       .build()
       .exec();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "smooth_knn_dist complete"
+    );
 
+    let started = Instant::now();
     let (rows, cols, vals) = ComputeMembershipStrengths::builder()
       .knn_indices(knn_indices)
       .knn_dists(knn_dists)
@@ -109,7 +117,12 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
       .sigmas(&sigmas.view())
       .build()
       .exec();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "compute_membership_strengths complete"
+    );
 
+    let started = Instant::now();
     // Parallel triplet collection: filter zero values in parallel
     let triplets: Vec<(usize, usize, f32)> = rows
       .as_slice()
@@ -125,16 +138,31 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
         }
       })
       .collect();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      triplet_count = triplets.len(),
+      "triplet filter complete"
+    );
 
+    let started = Instant::now();
     // Build TriMat from collected triplets (sequential but fast - just appending)
     let mut mat = TriMat::with_capacity((n_samples, n_samples), triplets.len());
     for (r, c, v) in triplets {
       mat.add_triplet(r, c, v);
     }
     let mut result = mat.to_csr::<usize>();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "initial trimat_to_csr complete"
+    );
 
     if apply_set_operations {
+      let started = Instant::now();
       result = apply_set_operations_parallel(&result, set_op_mix_ratio);
+      info!(
+        duration_ms = started.elapsed().as_millis(),
+        "set_operations complete"
+      );
     }
 
     (result, sigmas, rhos)
@@ -152,6 +180,7 @@ fn apply_set_operations_parallel(result: &CsMat<f32>, set_op_mix_ratio: f32) -> 
   let n_samples = result.shape().0;
   let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
 
+  let started = Instant::now();
   // Process each row in parallel - no sequential HashSet bottleneck
   let triplets: Vec<(usize, usize, f32)> = (0..n_samples)
     .into_par_iter()
@@ -182,7 +211,13 @@ fn apply_set_operations_parallel(result: &CsMat<f32>, set_op_mix_ratio: f32) -> 
       })
     })
     .collect();
+  info!(
+    duration_ms = started.elapsed().as_millis(),
+    upper_tri_triplets = triplets.len(),
+    "set_operations parallel compute complete"
+  );
 
+  let started = Instant::now();
   // Build TriMat and add symmetric entries
   let mut tri = TriMat::with_capacity((n_samples, n_samples), triplets.len() * 2);
   for (r, c, v) in triplets {
@@ -191,5 +226,17 @@ fn apply_set_operations_parallel(result: &CsMat<f32>, set_op_mix_ratio: f32) -> 
       tri.add_triplet(c, r, v);
     }
   }
-  tri.to_csr::<usize>()
+  info!(
+    duration_ms = started.elapsed().as_millis(),
+    "set_operations trimat_build complete"
+  );
+
+  let started = Instant::now();
+  let csr = tri.to_csr::<usize>();
+  info!(
+    duration_ms = started.elapsed().as_millis(),
+    "set_operations to_csr complete"
+  );
+
+  csr
 }
