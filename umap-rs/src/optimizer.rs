@@ -6,12 +6,15 @@ use crate::manifold::LearnedManifold;
 use crate::metric::Metric;
 use crate::metric::MetricType;
 use crate::umap::make_epochs_per_sample::make_epochs_per_sample;
+use crate::utils::parallel_vec::ParallelVec;
 use ndarray::Array1;
 use ndarray::Array2;
 use ndarray::ArrayView2;
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde::Serialize;
-use sprs::TriMat;
+use std::time::Instant;
+use tracing::info;
 
 /// Active optimization state for UMAP embedding.
 ///
@@ -83,12 +86,12 @@ impl Optimizer {
     let n_samples = graph.shape().0;
 
     // Determine epoch threshold for filtering weak edges
+    let started = Instant::now();
     let max_val = graph
       .data()
-      .iter()
+      .par_iter()
       .copied()
-      .max_by(|a, b| a.partial_cmp(b).unwrap())
-      .unwrap_or(1.0);
+      .reduce(|| 0.0f32, |a, b| a.max(b));
 
     let default_epochs = if n_samples <= 10000 { 500 } else { 200 };
     let threshold_epochs = if total_epochs > 10 {
@@ -97,35 +100,83 @@ impl Optimizer {
       default_epochs
     };
     let threshold = max_val / threshold_epochs as f32;
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      max_val, threshold, "optimizer threshold computed"
+    );
 
-    // Filter weak edges using TriMat
-    let mut tri = TriMat::new(graph.shape());
-    for (&val, (row, col)) in graph.iter() {
-      if val >= threshold {
-        // Convert u32 indices to usize for TriMat
-        tri.add_triplet(row as usize, col as usize, val);
-      }
+    // Count edges per row that pass threshold (parallel)
+    let started = Instant::now();
+    let row_counts: Vec<usize> = (0..n_samples)
+      .into_par_iter()
+      .map(|row| {
+        let row_start = graph.indptr().index(row);
+        let row_end = graph.indptr().index(row + 1);
+        let row_data = &graph.data()[row_start..row_end];
+        row_data.iter().filter(|&&v| v >= threshold).count()
+      })
+      .collect();
+
+    // Prefix sum for edge offsets
+    let mut edge_offsets: Vec<usize> = Vec::with_capacity(n_samples + 1);
+    edge_offsets.push(0);
+    let mut total_edges = 0usize;
+    for &count in &row_counts {
+      total_edges += count;
+      edge_offsets.push(total_edges);
     }
-    let filtered_graph = tri.to_csr::<usize>();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      total_edges, "optimizer edge filtering complete"
+    );
+
+    // Extract head, tail, and weights in parallel
+    let started = Instant::now();
+    let head_vec = ParallelVec::new(vec![0u32; total_edges]);
+    let tail_vec = ParallelVec::new(vec![0u32; total_edges]);
+    let weights_vec = ParallelVec::new(vec![0.0f32; total_edges]);
+
+    (0..n_samples).into_par_iter().for_each(|row| {
+      let row_start = graph.indptr().index(row);
+      let row_end = graph.indptr().index(row + 1);
+      let row_indices = &graph.indices()[row_start..row_end];
+      let row_data = &graph.data()[row_start..row_end];
+
+      let out_start = edge_offsets[row];
+      let mut offset = 0;
+
+      for (&col, &val) in row_indices.iter().zip(row_data) {
+        if val >= threshold {
+          // SAFETY: Each row writes to disjoint section [edge_offsets[row]..edge_offsets[row+1]]
+          unsafe {
+            head_vec.write(out_start + offset, row as u32);
+            tail_vec.write(out_start + offset, col);
+            weights_vec.write(out_start + offset, val);
+          }
+          offset += 1;
+        }
+      }
+    });
+
+    let head = head_vec.into_inner();
+    let tail = tail_vec.into_inner();
+    let weights = weights_vec.into_inner();
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "optimizer edge extraction complete"
+    );
 
     // Compute epochs per sample from edge weights
-    let graph_data_vec: Vec<f32> = filtered_graph.data().to_vec();
-    let graph_data_array = Array1::from(graph_data_vec);
-    let epochs_per_sample = make_epochs_per_sample(&graph_data_array.view(), total_epochs);
-
-    // Extract head and tail indices from graph structure
-    let mut head = Vec::new();
-    let mut tail = Vec::new();
-
-    for (row_idx, row) in filtered_graph.outer_iterator().enumerate() {
-      for (&col_idx, _val) in std::iter::zip(row.indices(), row.data()) {
-        head.push(row_idx as u32);
-        tail.push(col_idx as u32);
-      }
-    }
+    let started = Instant::now();
+    let weights_array = Array1::from(weights);
+    let epochs_per_sample = make_epochs_per_sample(&weights_array.view(), total_epochs);
 
     let head = Array1::from(head);
     let tail = Array1::from(tail);
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "optimizer epochs_per_sample complete"
+    );
 
     // Normalize embedding to [0, 10] range
     let mut embedding = init;

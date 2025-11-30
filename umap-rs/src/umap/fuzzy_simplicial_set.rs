@@ -1,11 +1,11 @@
 use crate::umap::smooth_knn_dist::SmoothKnnDist;
+use crate::utils::parallel_vec::ParallelVec;
 use dashmap::DashSet;
 use ndarray::Array1;
 use ndarray::ArrayView1;
 use ndarray::ArrayView2;
 use rayon::prelude::*;
 use sprs::CsMatI;
-use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -20,86 +20,15 @@ pub type SparseMat = CsMatI<f32, u32, usize>;
 /// CSC structure without data - only stores indptr and indices for transpose traversal.
 /// Values are looked up in the original CSR via binary search O(log k).
 struct CscStructure {
-  indptr: Vec<usize>,  // Column pointers (usize since nnz can exceed u32::MAX)
-  indices: Vec<u32>,   // Row indices (which rows have entries in each column)
+  indptr: Vec<usize>, // Column pointers (usize since nnz can exceed u32::MAX)
+  indices: Vec<u32>,  // Row indices (which rows have entries in each column)
 }
 
 impl CscStructure {
-  /// Iterate over (row_index) for entries in the given column
-  #[inline]
   fn col_row_indices(&self, col: usize) -> &[u32] {
     let start = self.indptr[col];
     let end = self.indptr[col + 1];
     &self.indices[start..end]
-  }
-}
-
-/// A Vec wrapped in UnsafeCell for parallel write access to disjoint regions.
-///
-/// `UnsafeCell<Vec<T>>` tells the compiler that the Vec's contents may be mutated
-/// even through shared references (`&self`). This is required for soundness -
-/// without UnsafeCell, the compiler assumes `&Vec<T>` means immutable contents.
-///
-/// # Safety
-///
-/// The caller must ensure that concurrent writes are to disjoint indices.
-/// This is used for parallel CSR construction where each row writes to its own
-/// section: `[indptr[i]..indptr[i+1]]`.
-struct ParallelVec<T> {
-  /// The Vec is inside UnsafeCell because we mutate it through &self.
-  /// This is the correct pattern - UnsafeCell<Vec<T>> not UnsafeCell<*mut T>.
-  data: UnsafeCell<Vec<T>>,
-}
-
-// SAFETY: Access is only safe when writes are to disjoint indices.
-// The algorithm guarantees this: each row i writes only to [indptr[i]..indptr[i+1]].
-unsafe impl<T: Send> Send for ParallelVec<T> {}
-unsafe impl<T: Send> Sync for ParallelVec<T> {}
-
-impl<T> ParallelVec<T> {
-  /// Create from an owned Vec.
-  fn new(vec: Vec<T>) -> Self {
-    Self {
-      data: UnsafeCell::new(vec),
-    }
-  }
-
-  /// Write a value at the given index.
-  ///
-  /// # Safety
-  ///
-  /// - Index must be in bounds
-  /// - No other thread may be accessing the same index concurrently
-  #[inline]
-  unsafe fn write(&self, index: usize, value: T) {
-    // SAFETY: Caller ensures index is valid and no concurrent access to this index.
-    // UnsafeCell::get() returns *mut Vec<T>, we deref to get &mut Vec<T>.
-    unsafe {
-      let vec = &mut *self.data.get();
-      debug_assert!(index < vec.len());
-      *vec.get_unchecked_mut(index) = value;
-    }
-  }
-
-  /// Get a mutable slice for a range. Used for sorting.
-  ///
-  /// # Safety
-  ///
-  /// - Range must be in bounds
-  /// - No other thread may be accessing the same range concurrently
-  #[inline]
-  unsafe fn get_mut_slice(&self, start: usize, len: usize) -> &mut [T] {
-    // SAFETY: Caller ensures range is valid and no concurrent access.
-    unsafe {
-      let vec = &mut *self.data.get();
-      debug_assert!(start + len <= vec.len());
-      &mut vec[start..start + len]
-    }
-  }
-
-  /// Consume and return the inner Vec.
-  fn into_inner(self) -> Vec<T> {
-    self.data.into_inner()
   }
 }
 
@@ -362,7 +291,6 @@ fn build_membership_csr(
   CsMatI::new((n_samples, n_samples), indptr, indices, data)
 }
 
-#[inline]
 fn compute_membership_strength(
   i: usize,
   j: usize,
@@ -442,7 +370,6 @@ fn build_csc_structure(csr: &SparseMat) -> CscStructure {
 }
 
 /// Binary search for value A[row, col] in CSR matrix. Returns 0.0 if not found.
-#[inline]
 fn csr_get(csr: &SparseMat, row: usize, col: u32) -> f32 {
   let row_start = csr.indptr().index(row);
   let row_end = csr.indptr().index(row + 1);
