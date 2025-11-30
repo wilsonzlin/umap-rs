@@ -6,7 +6,6 @@ use ndarray::ArrayView2;
 use rayon::prelude::*;
 use sprs::CsMat;
 use sprs::TriMat;
-use std::collections::HashSet;
 use typed_builder::TypedBuilder;
 
 /*
@@ -142,61 +141,55 @@ impl<'a, 'd> FuzzySimplicialSet<'a, 'd> {
   }
 }
 
-/// Apply fuzzy set union/intersection operations in a single parallel pass.
+/// Apply fuzzy set union/intersection operations.
 ///
 /// Computes: set_op_mix_ratio * (A + A^T) + (1 - 2*set_op_mix_ratio) * (A ⊙ A^T)
 /// where ⊙ is the Hadamard (elementwise) product.
 ///
-/// This fuses the transpose, hadamard, and combination into one parallel operation
-/// by computing each output value directly from the formula.
+/// Processes rows in parallel. For each row, iterates over non-zeros and computes
+/// the fused formula using values from both A[i,j] and A[j,i].
 fn apply_set_operations_parallel(result: &CsMat<f32>, set_op_mix_ratio: f32) -> CsMat<f32> {
-  let shape = result.shape();
-  let n_samples = shape.0;
+  let n_samples = result.shape().0;
+  let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
 
-  // Collect all canonical pairs (min(i,j), max(i,j)) from non-zero positions
-  // This avoids processing the same pair twice
-  let canonical_pairs: HashSet<(usize, usize)> = result
-    .iter()
-    .map(|(_, (r, c))| (r.min(c), r.max(c)))
-    .collect();
-
-  // Convert to Vec for parallel iteration
-  let pairs: Vec<(usize, usize)> = canonical_pairs.into_iter().collect();
-
-  // Parallel computation of fused formula for each position
-  let triplets: Vec<(usize, usize, f32)> = pairs
+  // Process each row in parallel - no sequential HashSet bottleneck
+  let triplets: Vec<(usize, usize, f32)> = (0..n_samples)
     .into_par_iter()
-    .flat_map(|(a, b)| {
-      // Look up values: result[a,b] and result[b,a]
-      let val_ab = result.get(a, b).copied().unwrap_or(0.0);
-      let val_ba = result.get(b, a).copied().unwrap_or(0.0);
+    .flat_map_iter(|row| {
+      // Get row data: indices and values for this row's non-zeros
+      let row_start = result.indptr().index(row);
+      let row_end = result.indptr().index(row + 1);
+      let indices = &result.indices()[row_start..row_end];
+      let data = &result.data()[row_start..row_end];
 
-      // Fused formula: mix * (A + A^T) + (1 - 2*mix) * (A ⊙ A^T)
-      // At position (a, b): mix * val_ab + mix * val_ba + (1 - 2*mix) * val_ab * val_ba
-      let prod_coeff = 1.0 - 2.0 * set_op_mix_ratio;
-      let final_val =
-        set_op_mix_ratio * val_ab + set_op_mix_ratio * val_ba + prod_coeff * val_ab * val_ba;
+      indices.iter().zip(data).filter_map(move |(&col, &val_rc)| {
+        // Only process upper triangle (row <= col) to avoid duplicates
+        if row > col {
+          return None;
+        }
 
-      let mut out = Vec::with_capacity(2);
+        let val_cr = result.get(col, row).copied().unwrap_or(0.0);
 
-      if final_val != 0.0 {
-        out.push((a, b, final_val));
-      }
+        // Fused formula: mix * (A + A^T) + (1 - 2*mix) * (A ⊙ A^T)
+        let final_val =
+          set_op_mix_ratio * val_rc + set_op_mix_ratio * val_cr + prod_coeff * val_rc * val_cr;
 
-      // For off-diagonal elements, also emit (b, a) with same value
-      // (the formula is symmetric: mix*x + mix*y + (1-2*mix)*xy = mix*y + mix*x + (1-2*mix)*yx)
-      if a != b && final_val != 0.0 {
-        out.push((b, a, final_val));
-      }
+        if final_val == 0.0 {
+          return None;
+        }
 
-      out
+        Some((row, col, final_val))
+      })
     })
     .collect();
 
-  // Build final TriMat from computed triplets
-  let mut tri = TriMat::with_capacity((n_samples, n_samples), triplets.len());
+  // Build TriMat and add symmetric entries
+  let mut tri = TriMat::with_capacity((n_samples, n_samples), triplets.len() * 2);
   for (r, c, v) in triplets {
     tri.add_triplet(r, c, v);
+    if r != c {
+      tri.add_triplet(c, r, v);
+    }
   }
   tri.to_csr::<usize>()
 }

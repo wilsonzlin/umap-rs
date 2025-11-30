@@ -74,6 +74,7 @@ impl<'a> SmoothKnnDist<'a> {
     let mean_distances = distances.mean().unwrap();
 
     // Parallel computation - each sample is completely independent
+    // NOTE: Avoid heap allocations inside parallel loop to prevent allocator contention
     let results: Vec<(f32, f32)> = (0..n_samples)
       .into_par_iter()
       .map(|i| {
@@ -82,30 +83,62 @@ impl<'a> SmoothKnnDist<'a> {
         let mut mid = 1.0;
 
         let ith_distances = distances.row(i);
-        let non_zero_dists: Vec<f32> = ith_distances
-          .iter()
-          .filter(|&&d| d > 0.0)
-          .copied()
-          .collect();
 
-        // Compute rho_i (local connectivity distance)
+        // Count non-zero distances and find max (no allocation)
+        let mut non_zero_count = 0usize;
+        let mut max_non_zero = 0.0f32;
+        for &d in ith_distances.iter() {
+          if d > 0.0 {
+            non_zero_count += 1;
+            if d > max_non_zero {
+              max_non_zero = d;
+            }
+          }
+        }
+
+        // Compute rho_i (local connectivity distance) without allocation
+        // We need the (index-1)th and (index)th non-zero values
         let mut rho_i = 0.0;
-        if non_zero_dists.len() >= local_connectivity as usize {
+        let local_conn_usize = local_connectivity as usize;
+        if non_zero_count >= local_conn_usize {
           let index = local_connectivity.floor() as usize;
           let interpolation = local_connectivity - local_connectivity.floor();
+
+          // Find the (index-1)th and (index)th non-zero values by iterating
+          let mut nth_minus_1 = 0.0f32;
+          let mut nth = 0.0f32;
+          let mut count = 0usize;
+          for &d in ith_distances.iter() {
+            if d > 0.0 {
+              if count + 1 == index {
+                nth_minus_1 = d;
+              }
+              if count + 1 == index + 1 {
+                nth = d;
+              }
+              count += 1;
+              if count > index + 1 {
+                break;
+              }
+            }
+          }
+
           if index > 0 {
-            rho_i = non_zero_dists[index - 1];
+            rho_i = nth_minus_1;
             if interpolation > SMOOTH_K_TOLERANCE {
-              rho_i += interpolation * (non_zero_dists[index] - non_zero_dists[index - 1]);
+              rho_i += interpolation * (nth - nth_minus_1);
             }
           } else {
-            rho_i = interpolation * non_zero_dists[0];
+            // index == 0, need the first non-zero
+            let first_non_zero = ith_distances
+              .iter()
+              .find(|&&d| d > 0.0)
+              .copied()
+              .unwrap_or(0.0);
+            rho_i = interpolation * first_non_zero;
           }
-        } else if !non_zero_dists.is_empty() {
-          rho_i = *non_zero_dists
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
+        } else if non_zero_count > 0 {
+          rho_i = max_non_zero;
         }
 
         // Binary search for sigma_i

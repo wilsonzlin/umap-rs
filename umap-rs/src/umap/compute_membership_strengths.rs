@@ -72,30 +72,29 @@ impl<'a, 's, 'r, 'd> ComputeMembershipStrengths<'a, 's, 'r, 'd> {
     let n_samples = knn_indices.shape()[0];
     let n_neighbors = knn_indices.shape()[1];
 
+    // NOTE: Use flat_map_iter instead of flat_map to avoid Vec allocation per sample
     let results: Vec<_> = (0..n_samples)
       .into_par_iter()
-      .flat_map(|i| {
-        (0..n_neighbors)
-          .filter_map(|j| {
-            if knn_disconnections.contains(&(i, j)) {
-              return None;
-            }
+      .flat_map_iter(|i| {
+        (0..n_neighbors).filter_map(move |j| {
+          if knn_disconnections.contains(&(i, j)) {
+            return None;
+          }
 
-            let knn_idx = knn_indices[(i, j)];
+          let knn_idx = knn_indices[(i, j)];
 
-            // If applied to an adjacency matrix points shouldn't be similar to themselves.
-            // If applied to an incidence matrix (or bipartite) then the row and column indices are different.
-            let val = if !bipartite && knn_idx == i as u32 {
-              0.0
-            } else if knn_dists[(i, j)] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
-              1.0
-            } else {
-              f32::exp(-(knn_dists[(i, j)] - rhos[i]) / sigmas[i])
-            };
+          // If applied to an adjacency matrix points shouldn't be similar to themselves.
+          // If applied to an incidence matrix (or bipartite) then the row and column indices are different.
+          let val = if !bipartite && knn_idx == i as u32 {
+            0.0
+          } else if knn_dists[(i, j)] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
+            1.0
+          } else {
+            f32::exp(-(knn_dists[(i, j)] - rhos[i]) / sigmas[i])
+          };
 
-            Some((i as u32, knn_idx, val))
-          })
-          .collect::<Vec<_>>()
+          Some((i as u32, knn_idx, val))
+        })
       })
       .collect();
 
