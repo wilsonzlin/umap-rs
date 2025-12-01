@@ -178,38 +178,56 @@ impl Optimizer {
       "optimizer epochs_per_sample complete"
     );
 
-    // Normalize embedding to [0, 10] range (parallel per column)
+    // Normalize embedding to [0, 10] range.
+    // Uses row indices + flat slice because columns aren't contiguous in row-major arrays.
     let started = Instant::now();
     let mut embedding = init;
-    let n_cols = embedding.shape()[1];
-    for col_idx in 0..n_cols {
-      let col_slice = embedding.column(col_idx);
-      let col_data = col_slice.as_slice().unwrap();
+    let n_rows = embedding.shape()[0];
+    let n_dims = embedding.shape()[1];
 
-      // Parallel min/max
-      let (min, max) = col_data
-        .par_iter()
-        .copied()
-        .fold(
-          || (f32::INFINITY, f32::NEG_INFINITY),
-          |(min, max), v| (min.min(v), max.max(v)),
-        )
-        .reduce(
-          || (f32::INFINITY, f32::NEG_INFINITY),
-          |(min1, max1), (min2, max2)| (min1.min(min2), max1.max(max2)),
-        );
+    // Compute min/max per dimension using fold/reduce (no per-row allocations)
+    let (mins, maxs) = (0..n_rows)
+      .into_par_iter()
+      .fold(
+        || (vec![f32::INFINITY; n_dims], vec![f32::NEG_INFINITY; n_dims]),
+        |(mut mins, mut maxs), i| {
+          let row = embedding.row(i);
+          for (d, &v) in row.iter().enumerate() {
+            mins[d] = mins[d].min(v);
+            maxs[d] = maxs[d].max(v);
+          }
+          (mins, maxs)
+        },
+      )
+      .reduce(
+        || (vec![f32::INFINITY; n_dims], vec![f32::NEG_INFINITY; n_dims]),
+        |(mut mins1, mut maxs1), (mins2, maxs2)| {
+          for d in 0..mins1.len() {
+            mins1[d] = mins1[d].min(mins2[d]);
+            maxs1[d] = maxs1[d].max(maxs2[d]);
+          }
+          (mins1, maxs1)
+        },
+      );
 
-      let range = max - min;
-      if range > 0.0 {
-        let scale = 10.0 / range;
-        embedding
-          .column_mut(col_idx)
-          .as_slice_mut()
-          .unwrap()
-          .par_iter_mut()
-          .for_each(|v| *v = (*v - min) * scale);
+    // Compute scales
+    let scales: Vec<f32> = mins
+      .iter()
+      .zip(&maxs)
+      .map(|(&min, &max)| {
+        let range = max - min;
+        if range > 0.0 { 10.0 / range } else { 0.0 }
+      })
+      .collect();
+
+    // Apply normalization (parallel over flat array since it's contiguous)
+    let flat = embedding.as_slice_mut().unwrap();
+    flat.par_iter_mut().enumerate().for_each(|(idx, v)| {
+      let d = idx % n_dims;
+      if scales[d] > 0.0 {
+        *v = (*v - mins[d]) * scales[d];
       }
-    }
+    });
     info!(
       duration_ms = started.elapsed().as_millis(),
       "optimizer embedding normalization complete"
@@ -221,9 +239,7 @@ impl Optimizer {
     let neg_rate = negative_sample_rate as f64;
     let eps_slice = epochs_per_sample.as_slice().unwrap();
 
-    let epoch_of_next_sample = Array1::from(
-      eps_slice.par_iter().copied().collect::<Vec<_>>(),
-    );
+    let epoch_of_next_sample = Array1::from(eps_slice.par_iter().copied().collect::<Vec<_>>());
     info!(
       duration_ms = started.elapsed().as_millis(),
       "optimizer epoch_of_next_sample complete"
