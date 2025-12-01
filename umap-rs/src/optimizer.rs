@@ -178,37 +178,82 @@ impl Optimizer {
       "optimizer epochs_per_sample complete"
     );
 
-    // Normalize embedding to [0, 10] range
+    // Normalize embedding to [0, 10] range (parallel per column)
+    let started = Instant::now();
     let mut embedding = init;
-    for col_idx in 0..embedding.shape()[1] {
-      let col_view = embedding.column(col_idx);
-      let min = col_view
-        .iter()
+    let n_cols = embedding.shape()[1];
+    for col_idx in 0..n_cols {
+      let col_slice = embedding.column(col_idx);
+      let col_data = col_slice.as_slice().unwrap();
+
+      // Parallel min/max
+      let (min, max) = col_data
+        .par_iter()
         .copied()
-        .min_by(|a, b| a.partial_cmp(b).unwrap())
-        .unwrap_or(0.0);
-      let max = col_view
-        .iter()
-        .copied()
-        .max_by(|a, b| a.partial_cmp(b).unwrap())
-        .unwrap_or(1.0);
+        .fold(
+          || (f32::INFINITY, f32::NEG_INFINITY),
+          |(min, max), v| (min.min(v), max.max(v)),
+        )
+        .reduce(
+          || (f32::INFINITY, f32::NEG_INFINITY),
+          |(min1, max1), (min2, max2)| (min1.min(min2), max1.max(max2)),
+        );
 
       let range = max - min;
       if range > 0.0 {
-        for row_idx in 0..embedding.shape()[0] {
-          embedding[(row_idx, col_idx)] = 10.0 * (embedding[(row_idx, col_idx)] - min) / range;
-        }
+        let scale = 10.0 / range;
+        embedding
+          .column_mut(col_idx)
+          .as_slice_mut()
+          .unwrap()
+          .par_iter_mut()
+          .for_each(|v| *v = (*v - min) * scale);
       }
     }
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "optimizer embedding normalization complete"
+    );
 
-    // Initialize epoch scheduling
-    let epochs_per_negative_sample: Array1<f64> = epochs_per_sample
-      .iter()
-      .map(|&eps| eps / negative_sample_rate as f64)
-      .collect();
+    // Initialize epoch scheduling (one at a time to avoid memory spike).
+    // No perf loss: each array is still computed in parallel, just not allocated simultaneously.
+    let started = Instant::now();
+    let neg_rate = negative_sample_rate as f64;
+    let eps_slice = epochs_per_sample.as_slice().unwrap();
 
-    let epoch_of_next_negative_sample = epochs_per_negative_sample.clone();
-    let epoch_of_next_sample = epochs_per_sample.clone();
+    let epoch_of_next_sample = Array1::from(
+      eps_slice.par_iter().copied().collect::<Vec<_>>(),
+    );
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "optimizer epoch_of_next_sample complete"
+    );
+
+    let started = Instant::now();
+    let epochs_per_negative_sample = Array1::from(
+      eps_slice
+        .par_iter()
+        .map(|&eps| eps / neg_rate)
+        .collect::<Vec<_>>(),
+    );
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "optimizer epochs_per_negative_sample complete"
+    );
+
+    let started = Instant::now();
+    let epoch_of_next_negative_sample = Array1::from(
+      epochs_per_negative_sample
+        .as_slice()
+        .unwrap()
+        .par_iter()
+        .copied()
+        .collect::<Vec<_>>(),
+    );
+    info!(
+      duration_ms = started.elapsed().as_millis(),
+      "optimizer epoch_of_next_negative_sample complete"
+    );
 
     Self {
       manifold,

@@ -141,6 +141,19 @@ Every `unsafe` block has a safety comment explaining WHY it's needed. If you see
 ### Don't add `Send`/`Sync` bounds everywhere
 Rayon requires `Send + Sync` for parallel iterators. But this is satisfied by `UnsafeSyncCell`. Adding manual bounds elsewhere usually means you're fighting the borrow checker instead of solving the real problem.
 
+### Don't use `pub use` re-exports
+Use full module paths (e.g., `crate::utils::parallel_vec::ParallelVec`) instead of re-exporting at module root. Keeps dependencies explicit.
+
+### Don't use qualified paths inline
+Always import at the top of the file:
+```rust
+use std::cell::UnsafeCell;  // Good: import at top
+// NOT: std::cell::UnsafeCell::new(...)  // Bad: qualified inline
+```
+
+### Don't add `#[inline]` everywhere
+Let the compiler decide. Release builds with LTO will inline small functions anyway. Only use `#[inline]` if profiling shows a specific call site needs it.
+
 ## Architecture decisions
 
 ### Why no error types?
