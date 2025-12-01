@@ -1,6 +1,6 @@
 [package]
 name = "umap-rs"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 license = "BSD-3-Clause"
 description = "Fast, parallel Rust implementation of the core UMAP dimensionality reduction algorithm"
