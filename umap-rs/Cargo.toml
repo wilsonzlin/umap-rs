@@ -1,6 +1,6 @@
 [package]
 name = "umap-rs"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 license = "BSD-3-Clause"
 description = "Fast, parallel, memory-efficient Rust implementation of UMAP"
