@@ -2,7 +2,7 @@
 
 Fast, parallel Rust implementation of the core UMAP algorithm. Clean, modern Rust implementation focused on performance and correctness.
 
-Scales to 264 million samples in 2 hours on a 126-core machine (see [Performance](#performance)).
+Embeds 264 million samples to 2D in 2 hours (500 epochs) on a 126-core machine (see [Performance](#performance)).
 
 ## What this is
 
@@ -280,10 +280,11 @@ This implementation is designed for large-scale datasets (100M+ samples) on high
 
 ### Real-world benchmark
 
-264 million samples embedded to 2D in 2 hours on a 126-core AMD EPYC 9J45 with 1.4 TB RAM:
+264 million text embeddings from a [search engine](https://blog.wilsonl.in/search-engine) embedded to 2D in 2 hours on a 126-core AMD EPYC 9J45 with 1.4 TB RAM:
 - Precomputed KNN (n_neighbors=100)
 - Precomputed PCA initialization
 - Symmetrization disabled
+- 500 epochs
 - ~1 TB peak memory
 
 ### Parallelization
