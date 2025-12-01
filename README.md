@@ -2,20 +2,16 @@
 
 Fast, parallel Rust implementation of the core UMAP algorithm. Clean, modern Rust implementation focused on performance and correctness.
 
+Scales to 264 million samples in 2 hours on a 126-core machine (see [Performance](#performance)).
+
 ## What this is
 
 - Core UMAP dimensionality reduction algorithm
-- Parallel SGD optimization via Rayon
+- Fully parallelized via Rayon with memory-efficient sparse matrix construction
 - Extensible metric system (Euclidean + custom metrics)
 - Checkpointing and fault-tolerant training
 - Dense arrays only (no sparse matrix support)
 - Fit only (transform for new points not yet implemented)
-
-## What this is NOT
-
-- Drop-in replacement for Python umap-learn
-- General-purpose ML library
-- Production-ready with validation/error handling
 
 See [DIVERGENCES.md](DIVERGENCES.md) for detailed comparison to Python umap-learn.
 
@@ -199,8 +195,11 @@ let graph = GraphParams {
     local_connectivity: 1.0,      // Local neighborhood connectivity
     set_op_mix_ratio: 1.0,        // Fuzzy union (1.0) vs intersection (0.0)
     disconnection_distance: None, // Auto-computed from metric
+    symmetrize: true,             // Symmetrize graph (set false to save memory)
 };
 ```
+
+The `symmetrize` option controls whether the fuzzy graph is symmetrized via fuzzy set union. For very large datasets, setting `symmetrize: false` roughly halves memory usage with minimal impact on 2D visualization quality.
 
 ### Optimization
 
@@ -277,9 +276,91 @@ cargo build --release
 
 ## Performance
 
-- **Parallel graph construction**: Fuzzy simplicial set computation is fully parallelized via Rayon
-- **Parallel SGD**: Enabled by default via Rayon
-- **Hogwild! algorithm**: Lock-free parallel gradient descent
+This implementation is designed for large-scale datasets (100M+ samples) on high-core-count machines.
+
+### Real-world benchmark
+
+264 million samples embedded to 2D in 2 hours on a 126-core AMD EPYC 9J45 with 1.4 TB RAM:
+- Precomputed KNN (n_neighbors=100)
+- Precomputed PCA initialization
+- Symmetrization disabled
+- ~1 TB peak memory
+
+### Parallelization
+
+Every phase is fully parallelized via Rayon:
+
+- **Graph construction**: Parallel smooth KNN distance, parallel CSR matrix construction
+- **Set operations**: Parallel CSC structure building, parallel symmetrization
+- **Optimizer initialization**: Parallel edge filtering, parallel epoch scheduling
+- **SGD optimization**: Lock-free Hogwild! algorithm for parallel gradient descent
+
+### Memory Efficiency
+
+Optimized for minimal memory footprint at scale:
+
+- **Direct CSR construction**: Builds sparse matrices in-place without intermediate COO/triplet format. Avoids O(nnz) temporary allocations and O(nnz log nnz) global sorting.
+- **u32 indices**: Uses 4-byte indices instead of 8-byte, halving index memory for datasets up to ~4B samples.
+- **CSC structure-only**: Transpose operations store only structure (indptr + indices), looking up values in original CSR via O(log k) binary search.
+- **Sequential array allocation**: Large arrays are allocated one at a time to avoid memory spikes.
+- **No cloning**: Avoids sequential `.clone()` on large arrays; uses parallel copies when needed.
+
+### Scaling Guidelines
+
+Memory scales with `n_samples × n_neighbors`:
+
+| n_samples | n_neighbors | Approx. Memory |
+|-----------|-------------|----------------|
+| 10M       | 30          | ~10 GB         |
+| 100M      | 30          | ~100 GB        |
+| 250M      | 30          | ~250 GB        |
+| 250M      | 256         | ~2 TB          |
+
+To reduce memory:
+- Use smaller `n_neighbors` (15-50 is typical for visualization)
+- Disable symmetrization: `config.graph.symmetrize = false`
+- Slice KNN arrays to use fewer neighbors than computed
+
+### Configuration for Large Datasets
+
+```rust
+let config = UmapConfig {
+    graph: GraphParams {
+        n_neighbors: 30,      // Lower = less memory
+        symmetrize: false,    // Skip symmetrization to save memory
+        ..Default::default()
+    },
+    ..Default::default()
+};
+```
+
+### Timing Logs
+
+The library emits structured logs via the `tracing` crate. Enable a subscriber to see timing for each phase:
+
+```rust
+tracing_subscriber::fmt::init();  // or your preferred subscriber
+```
+
+Example output:
+```
+INFO umap_rs::umap::fuzzy_simplicial_set: smooth_knn_dist complete duration_ms=52033
+INFO umap_rs::umap::fuzzy_simplicial_set: csr row_counts complete duration_ms=48495
+INFO umap_rs::umap::fuzzy_simplicial_set: csr indptr complete duration_ms=560 nnz=62586367074
+INFO umap_rs::optimizer: optimizer edge filtering complete duration_ms=725 total_edges=23276942679
+```
+
+### Advanced: Accessing the Graph
+
+The fuzzy simplicial set graph is exposed as `SparseMat` (a `CsMatI<f32, u32, usize>`):
+
+```rust
+use umap_rs::SparseMat;
+
+let manifold = umap.learn_manifold(data.view(), knn_indices.view(), knn_dists.view());
+let graph: &SparseMat = manifold.graph();
+// graph uses u32 column indices (memory efficient) and usize row pointers (handles large nnz)
+```
 
 ## Documentation
 
@@ -298,11 +379,24 @@ Run `cargo doc --open` to browse the API documentation.
 
 ## Limitations
 
+- **Maximum ~4 billion samples**: Uses `u32` indices internally for memory efficiency
 - No input validation (assumes clean data)
 - Transform not yet implemented
 - Dense arrays only
 - Panics on invalid input (not Result-based errors)
 - Requires external KNN computation and initialization
+
+### KNN Sentinel Values
+
+If your KNN search couldn't find `k` neighbors for some points (e.g., isolated points), use `u32::MAX` as a sentinel index and any distance value (commonly `f32::INFINITY`). These entries are automatically skipped during graph construction:
+
+```rust
+// Point 5 only has 2 real neighbors, rest are sentinels
+knn_indices[[5, 0]] = 10;           // real neighbor
+knn_indices[[5, 1]] = 23;           // real neighbor  
+knn_indices[[5, 2]] = u32::MAX;     // sentinel - skipped
+knn_indices[[5, 3]] = u32::MAX;     // sentinel - skipped
+```
 
 This is a specialized tool for the core algorithm. Wrap it in validation/error handling for production use.
 

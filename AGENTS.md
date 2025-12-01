@@ -113,6 +113,66 @@ let dist_squared = rdist(&current, &other);  // No sqrt
 
 **Do NOT add sqrt calls.** The formulas are designed for squared distance.
 
+### Parallel patterns that avoid allocator contention
+
+When parallelizing over millions of items, avoid patterns that allocate per-item:
+
+**Bad** (causes high system CPU from allocator contention):
+```rust
+items.par_iter().map(|x| {
+  let mut vec = Vec::new();  // Allocation per item!
+  // ...
+}).collect()
+```
+
+**Good** (use fold/reduce with thread-local accumulators):
+```rust
+items.par_iter()
+  .fold(|| Vec::with_capacity(expected), |mut acc, x| { acc.push(x); acc })
+  .reduce(|| Vec::new(), |mut a, b| { a.extend(b); a })
+```
+
+### Avoiding sequential clones of large arrays
+
+`Array1::clone()` is sequential. For arrays with billions of elements, this takes minutes.
+
+**Bad**:
+```rust
+let copy = large_array.clone();  // Sequential memcpy
+```
+
+**Good** (parallel copy):
+```rust
+let copy = Array1::from(
+  large_array.as_slice().unwrap().par_iter().copied().collect::<Vec<_>>()
+);
+```
+
+### Row-major arrays and column access
+
+Columns of row-major 2D arrays are NOT contiguous. `column.as_slice()` returns `None`.
+
+**Bad** (panics):
+```rust
+let col = array.column(0).as_slice().unwrap();  // None!
+```
+
+**Good** (use row iteration or flat access):
+```rust
+// Option 1: iterate rows, access column index
+(0..n_rows).into_par_iter().fold(..., |acc, i| {
+  let val = array[(i, col_idx)];
+  // ...
+});
+
+// Option 2: flat slice with index math
+let flat = array.as_slice_mut().unwrap();
+flat.par_iter_mut().enumerate().for_each(|(idx, v)| {
+  let col = idx % n_cols;
+  // ...
+});
+```
+
 ## Common mistakes to avoid
 
 ### Don't store ArrayView2 in long-lived structs
@@ -207,3 +267,50 @@ If you're considering changes that involve:
 - Adding locks/atomics
 
 Stop and document WHY you think this is needed. The current design is the result of fighting the borrow checker for hours. Your "obvious fix" probably won't work.
+
+## Lessons learned from large-scale optimization
+
+This codebase was optimized for 250M+ samples on 144-core machines. Key learnings:
+
+### High system CPU has multiple causes
+When you see 95% system/kernel time across all cores, common causes:
+- **Allocator contention**: Millions of threads hitting malloc simultaneously. Fix with fold/reduce patterns using thread-local accumulators.
+- **Memory-mapped I/O**: Data still being read from disk appears as system time. Wait for I/O to complete before profiling.
+- **Atomic contention**: Many threads updating the same atomic variable. Avoid atomics in hot paths or use per-thread counters.
+- **True sharing**: Threads writing to the same memory locations (e.g., concurrent updates to shared array slots). Partition work so each thread owns disjoint regions.
+- **False sharing**: Threads writing to adjacent memory locations cause cache line bouncing. Ensure each thread writes to its own cache-line-aligned region.
+
+### Sequential operations hide at surprising places
+- `Array1::clone()` is sequential memcpy
+- `TriMat::to_csr()` does O(nnz log nnz) sequential sort
+- `CsMat::to_csc()` is sequential
+- ndarray's column access on row-major arrays isn't contiguous
+
+Always add timing logs to identify bottlenecks before optimizing.
+
+### Memory scales with edges, not samples
+At n_samples=250M, n_neighbors=256: edges ≈ 60 billion. Each edge needs:
+- head/tail indices: 8 bytes
+- 4 scheduling arrays (f64): 32 bytes
+- graph data/indices: 8 bytes
+
+Total: ~48 bytes per edge × 60B edges ≈ 2.8 TB. Reducing n_neighbors is the primary memory lever.
+
+### Parallel copies beat sequential clones
+For billion-element arrays:
+```rust
+// Bad: sequential, takes minutes
+let copy = arr.clone();
+
+// Good: parallel, takes seconds
+let copy = Array1::from(arr.as_slice().unwrap().par_iter().copied().collect::<Vec<_>>());
+```
+
+### Allocate large arrays one at a time
+Computing three 400GB arrays simultaneously spikes memory to 1.2TB. Computing them sequentially (each still parallel internally) keeps peak at 400GB with no performance loss.
+
+### u32 indices save half the memory
+For datasets under 4B samples, use `CsMatI<f32, u32>` instead of `CsMat<f32>`. Cuts index memory in half.
+
+### CSC structure-only saves the data array
+When you only need transpose structure for iteration, build CscStructure (indptr + indices only) and look up values in original CSR. Avoids duplicating the data array entirely.

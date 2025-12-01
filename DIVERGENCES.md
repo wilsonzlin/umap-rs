@@ -57,7 +57,23 @@ The following Python UMAP features were intentionally removed per project requir
 
 **Parallel graph construction:** Python UMAP's `smooth_knn_dist` runs sequentially (Numba JIT but single-threaded for this phase). Rust parallelizes the per-sample binary search via Rayon. Results are identical.
 
+**Parallel optimizer initialization:** Python UMAP's optimizer setup (filtering edges, computing epoch schedules) is sequential. Rust parallelizes all phases:
+- Parallel max value computation
+- Parallel row counting and edge filtering
+- Parallel edge extraction (head/tail/weights)
+- Parallel epochs_per_sample computation
+- Parallel embedding normalization
+- Parallel epoch scheduling array creation
+
+**Sequential array allocation:** Python allocates multiple large arrays simultaneously. Rust allocates them one at a time to avoid memory spikes. No performance loss since each allocation is still parallel internally.
+
 **Epoch tracking:** Python modifies arrays in-place within numba kernels. Rust uses the same pattern but with explicit `UnsafeSyncCell` wrapper for clarity.
+
+**Optional symmetrization:** Python UMAP always symmetrizes the fuzzy graph (A + A^T fuzzy union). Rust exposes `config.graph.symmetrize` to optionally skip this, halving memory for large datasets. For 2D visualization, skipping symmetrization typically has minimal impact on output quality.
+
+**Structured timing logs:** Rust emits timing information via the `tracing` crate (structured logging). Python uses verbose print statements. Enable a tracing subscriber to see phase-by-phase timing.
+
+**Sentinel value handling:** Rust gracefully handles `u32::MAX` in KNN indices as a sentinel for missing neighbors (when KNN search couldn't find k neighbors for a point). These entries are skipped during graph construction.
 
 ## Semantic Equivalences Maintained
 
