@@ -127,16 +127,6 @@ edges.par_iter().for_each(|edge| {
 - All points repel each other like charged particles (repulsive force)
 - Run physics simulation → points settle into configuration that respects high-D structure
 
-## Comparison to t-SNE
-
-| Feature | t-SNE | UMAP |
-|---------|-------|------|
-| **Speed** | Slow (O(n² log n)) | Fast (O(n^1.14)) + parallelizable |
-| **Scalability** | Struggles >10k points | Handles millions |
-| **Global structure** | Poor | Better preserves global distances |
-| **Theory** | Ad-hoc | Grounded in manifold theory |
-| **Tuning** | Sensitive to perplexity | More robust defaults |
-
 ## Code flow in this repo
 
 ```
@@ -160,7 +150,7 @@ umap.fit(X)
 └─ Return 2D embedding
 ```
 
-## Practical tips
+## Usage
 
 **When to use UMAP:**
 - Visualization of high-D data (the primary use case)
@@ -177,7 +167,3 @@ umap.fit(X)
 - Different runs give different layouts (but similar structure)
 - Distances in 2D are NOT metric (close = similar, but far ≠ dissimilar)
 - Only fit() is implemented here, no transform() for new points
-
-## Mathematical footnote
-
-The fuzzy set operations and membership functions come from category theory / algebraic topology. The "manifold" interpretation: locally, high-D data looks Euclidean, globally it's curved. UMAP learns this curvature via the graph, then flattens it. The `a, b` parameters are derived from a specific choice of distance function on the manifold. You don't need to understand this to use UMAP effectively.
